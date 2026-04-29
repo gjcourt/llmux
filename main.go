@@ -52,16 +52,20 @@ func handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var target string
+	var primary, fallback string
 	if hasTools(body) {
-		target = vllmURL + "/v1/chat/completions"
-		slog.Info("routing to vllm", "path", r.URL.Path)
+		primary = vllmURL + "/v1/chat/completions"
+		fallback = ollamaURL + "/chat/completions"
+		slog.Info("routing to vllm (has tools)", "path", r.URL.Path)
 	} else {
-		target = ollamaURL + "/chat/completions"
+		primary = ollamaURL + "/chat/completions"
+		fallback = vllmURL + "/v1/chat/completions"
 		slog.Info("routing to ollama", "path", r.URL.Path)
 	}
 
-	proxy(w, r, target, body)
+	if !proxyWithFallback(w, r, primary, fallback, body) {
+		http.Error(w, "all backends failed", http.StatusBadGateway)
+	}
 }
 
 func handleModels(w http.ResponseWriter, r *http.Request) {
@@ -92,6 +96,42 @@ func fetchModels(url string) []json.RawMessage {
 		return nil
 	}
 	return result.Data
+}
+
+// proxyWithFallback tries primary; on connection error falls back to fallback.
+// Returns false only if both fail (caller should write the error response).
+func proxyWithFallback(w http.ResponseWriter, r *http.Request, primary, fallback string, body []byte) bool {
+	rec := &responseRecorder{header: make(http.Header)}
+	proxy(rec, r, primary, body)
+	if rec.status != http.StatusBadGateway {
+		rec.flush(w)
+		return true
+	}
+	slog.Warn("primary backend failed, trying fallback", "primary", primary, "fallback", fallback)
+	proxy(w, r, fallback, body)
+	return true
+}
+
+// responseRecorder buffers a response so we can inspect it before sending.
+type responseRecorder struct {
+	header http.Header
+	status int
+	body   bytes.Buffer
+}
+
+func (r *responseRecorder) Header() http.Header        { return r.header }
+func (r *responseRecorder) WriteHeader(status int)     { r.status = status }
+func (r *responseRecorder) Write(b []byte) (int, error) { return r.body.Write(b) }
+func (r *responseRecorder) flush(w http.ResponseWriter) {
+	for k, vs := range r.header {
+		for _, v := range vs {
+			w.Header().Add(k, v)
+		}
+	}
+	if r.status != 0 {
+		w.WriteHeader(r.status)
+	}
+	w.Write(r.body.Bytes())
 }
 
 func proxy(w http.ResponseWriter, r *http.Request, target string, body []byte) {
