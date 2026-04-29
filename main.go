@@ -32,6 +32,7 @@ func main() {
 	mux.HandleFunc("POST /v1/chat/completions", handleChat)
 	mux.HandleFunc("GET /v1/models", handleModels)
 
+	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug})))
 	slog.Info("llmux listening", "addr", addr, "vllm", vllmURL, "ollama", ollamaURL)
 	if err := http.ListenAndServe(addr, mux); err != nil {
 		slog.Error("server error", "err", err)
@@ -60,12 +61,43 @@ func forceNoStream(body []byte) []byte {
 	return result
 }
 
+// stripTools removes tools and tool_choice from the request body so the model responds as plain chat.
+func stripTools(body []byte) []byte {
+	var req map[string]json.RawMessage
+	if err := json.Unmarshal(body, &req); err != nil {
+		return body
+	}
+	delete(req, "tools")
+	delete(req, "tool_choice")
+	result, _ := json.Marshal(req)
+	return result
+}
+
+// isEmptyNonToolResponse returns true when the model responded with no content and no tool calls —
+// meaning the model silently gave up rather than answering or calling a tool.
+func isEmptyNonToolResponse(body []byte) bool {
+	var resp openAIResponse
+	if err := json.Unmarshal(body, &resp); err != nil {
+		return false
+	}
+	if len(resp.Choices) == 0 {
+		return true
+	}
+	c := resp.Choices[0]
+	if c.FinishReason == "tool_calls" || len(c.Message.ToolCalls) > 0 {
+		return false
+	}
+	return c.Message.Content == nil || *c.Message.Content == ""
+}
+
 func handleChat(w http.ResponseWriter, r *http.Request) {
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		http.Error(w, "failed to read request body", http.StatusInternalServerError)
 		return
 	}
+
+	slog.Debug("incoming request", "body", string(body[:min(len(body), 300)]))
 
 	if hasTools(body) {
 		// vLLM handles tools natively; fall back to ollama with <tool_call> → tool_calls transform.
@@ -74,7 +106,7 @@ func handleChat(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		slog.Warn("vLLM unavailable, falling back to ollama with tool transform")
-		proxyTransform(w, r, ollamaURL+"/chat/completions", forceNoStream(body))
+		proxyTransform(w, r, ollamaURL+"/chat/completions", forceNoStream(body), body)
 	} else {
 		slog.Info("routing to ollama", "path", r.URL.Path)
 		if proxyStream(w, r, ollamaURL+"/chat/completions", body) {
@@ -138,7 +170,8 @@ func proxyStream(w http.ResponseWriter, r *http.Request, target string, body []b
 }
 
 // proxyTransform sends body to target, buffers the response, applies the tool-call transform, and writes the result.
-func proxyTransform(w http.ResponseWriter, r *http.Request, target string, body []byte) {
+// originalBody is the pre-forceNoStream request body; it's used to retry as plain chat if the model returns empty.
+func proxyTransform(w http.ResponseWriter, r *http.Request, target string, body []byte, originalBody []byte) {
 	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, target, bytes.NewReader(body))
 	if err != nil {
 		http.Error(w, "failed to create upstream request", http.StatusInternalServerError)
@@ -172,21 +205,24 @@ func proxyTransform(w http.ResponseWriter, r *http.Request, target string, body 
 		slog.Warn("tool call transform failed, passing through", "err", err)
 		transformed = respBody
 	}
+	slog.Debug("transform result", "raw", string(respBody[:min(len(respBody), 500)]), "transformed", string(transformed[:min(len(transformed), 500)]))
 
-	for k, vs := range resp.Header {
-		for _, v := range vs {
-			w.Header().Add(k, v)
-		}
+	// Ollama sometimes returns empty content when tools are present but not needed.
+	// Retry as plain chat (no tools) so the model can respond conversationally.
+	if isEmptyNonToolResponse(transformed) {
+		slog.Warn("ollama returned empty response with tools, retrying as plain chat")
+		proxyStream(w, r, target, stripTools(originalBody))
+		return
 	}
-	w.Header().Del("Transfer-Encoding")
+
 	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Content-Length", fmt.Sprintf("%d", len(transformed)))
 	w.WriteHeader(resp.StatusCode)
 	w.Write(transformed) //nolint:errcheck
 }
 
 var (
-	reThink    = regexp.MustCompile(`(?s)<think>.*?</think>\s*`)
+	// Ollama sometimes strips the <think>...</think> content but leaves the closing tag.
+	reThink    = regexp.MustCompile(`(?s)(?:<think>.*?</think>|</think>)\s*`)
 	reToolCall = regexp.MustCompile(`(?s)<tool_call>\s*(.*?)\s*</tool_call>`)
 )
 

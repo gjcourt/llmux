@@ -245,3 +245,46 @@ func TestTransform_InvalidTopLevelJSON(t *testing.T) {
 		t.Fatal("expected error for invalid JSON input")
 	}
 }
+
+// --- stripTools ---
+
+func TestStripTools_RemovesTools(t *testing.T) {
+	body := `{"model":"x","tools":[{"type":"function"}],"tool_choice":"auto","messages":[]}`
+	out := stripTools([]byte(body))
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal(out, &m); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := m["tools"]; ok {
+		t.Error("tools key should be removed")
+	}
+	if _, ok := m["tool_choice"]; ok {
+		t.Error("tool_choice key should be removed")
+	}
+	if _, ok := m["messages"]; !ok {
+		t.Error("messages key should be preserved")
+	}
+}
+
+// --- isEmptyNonToolResponse ---
+
+func TestIsEmptyNonToolResponse_EmptyContent(t *testing.T) {
+	if !isEmptyNonToolResponse(ollamaResp("")) {
+		t.Fatal("empty content should be detected as empty")
+	}
+}
+
+func TestIsEmptyNonToolResponse_PlainText(t *testing.T) {
+	if isEmptyNonToolResponse(ollamaResp("Hello!")) {
+		t.Fatal("non-empty content should not be empty")
+	}
+}
+
+func TestIsEmptyNonToolResponse_WithToolCalls(t *testing.T) {
+	// A properly transformed response with tool_calls should never be "empty".
+	input := ollamaResp(`<tool_call>{"name":"f","arguments":{}}</tool_call>`)
+	transformed, _ := applyToolCallTransform(input)
+	if isEmptyNonToolResponse(transformed) {
+		t.Fatal("response with tool_calls should not be considered empty")
+	}
+}
