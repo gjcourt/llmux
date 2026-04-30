@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -477,12 +478,17 @@ func applyToolCallTransform(body []byte) ([]byte, error) {
 				return json.NewDecoder(strings.NewReader(s)).Decode(&tc)
 			}
 			if err := tryDecode(raw); err != nil {
-				// Models sometimes emit literal newlines inside JSON strings (invalid JSON).
-				// Repair by escaping control characters within string values and retry.
+				// Pass 1: escape control characters and invalid escape sequences.
 				repaired := repairJSONStrings(raw)
 				if err2 := tryDecode(repaired); err2 != nil {
-					slog.Warn("failed to parse tool_call JSON", "err", err2, "raw", raw[:min(len(raw), 400)])
-					continue
+					// Pass 2: use json.SyntaxError offset to find and escape unescaped "
+					// characters that terminate JSON strings early. Models embed Python
+					// string literals like "\"text\"" without escaping their outer delimiters.
+					repaired2 := repairUnescapedQuotes(repaired)
+					if err3 := tryDecode(repaired2); err3 != nil {
+						slog.Warn("failed to parse tool_call JSON", "err", err3, "raw", raw[:min(len(raw), 400)])
+						continue
+					}
 				}
 			}
 			calls = append(calls, openAIToolCall{
@@ -538,11 +544,9 @@ func repairJSONStrings(s string) string {
 			if inString {
 				switch c {
 				case '"', '\\', '/', 'b', 'f', 'n', 'r', 't', 'u':
-					// Valid JSON escape — the leading backslash was already written.
 					b.WriteRune(c)
 				default:
-					// Invalid JSON escape (e.g. \s \d \w \1 from Python) — escape
-					// the backslash we already wrote so \X becomes \\X.
+					// Invalid escape (\s \d \w …) — double the backslash.
 					b.WriteRune('\\')
 					b.WriteRune(c)
 				}
@@ -577,6 +581,52 @@ func repairJSONStrings(s string) string {
 		}
 	}
 	return b.String()
+}
+
+// repairUnescapedQuotes handles a third class of model error: Python string
+// literals like "\"text\"" embedded in a JSON string value whose outer "
+// delimiters are not escaped. The json.SyntaxError offset pinpoints exactly
+// where the parse failed; we walk backward to find the unescaped " and escape
+// it, then retry. Up to 20 passes handle multiple such quotes per string.
+func repairUnescapedQuotes(s string) string {
+	for range 20 {
+		var se *json.SyntaxError
+		err := json.NewDecoder(strings.NewReader(s)).Decode(new(any))
+		if err == nil {
+			return s
+		}
+		if !errors.As(err, &se) {
+			return s
+		}
+		pos := int(se.Offset) - 1 // 0-indexed position of the offending char
+		if pos < 0 || pos >= len(s) {
+			return s
+		}
+		// Walk backward from the error position to find the unescaped " whose
+		// premature string-close caused the parse failure.
+		quotePos := -1
+		for i := pos - 1; i >= 0; i-- {
+			if s[i] != '"' {
+				continue
+			}
+			// Count consecutive preceding backslashes.
+			numBS := 0
+			for j := i - 1; j >= 0 && s[j] == '\\'; j-- {
+				numBS++
+			}
+			if numBS%2 == 0 {
+				// Unescaped quote — this is our culprit.
+				quotePos = i
+				break
+			}
+			// Escaped quote — keep looking.
+		}
+		if quotePos < 0 {
+			return s
+		}
+		s = s[:quotePos] + `\"` + s[quotePos+1:]
+	}
+	return s
 }
 
 func handleModels(w http.ResponseWriter, r *http.Request) {

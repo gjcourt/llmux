@@ -314,6 +314,28 @@ func TestTransform_TrailingGarbageAfterJSON(t *testing.T) {
 	}
 }
 
+func TestTransform_UnescapedQuotesInCode(t *testing.T) {
+	// Model generates Python list literals with "\"...\""  where the outer Python
+	// string delimiter " is NOT escaped in the enclosing JSON string.
+	// e.g. queries = [..., "\"George Courtsunis\""] where the outer " is bare.
+	rawContent := "<tool_call>\n{\"name\": \"execute_code\", \"arguments\": {\"code\": \"queries = [\\n    \\\"George Courtsunis\\\",\\n    \"\\\"George Courtsunis\\\"\"]\\nprint(queries)\"}}\n</tool_call>"
+	input := ollamaResp(rawContent)
+	out, err := applyToolCallTransform(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := parseTransform(t, out)
+	if r.FinishReason != "tool_calls" {
+		t.Errorf("finish_reason: want tool_calls, got %s — unescaped quotes not repaired", r.FinishReason)
+	}
+	if len(r.ToolCalls) != 1 {
+		t.Fatalf("want 1 tool call, got %d", len(r.ToolCalls))
+	}
+	if r.ToolCalls[0].Function.Name != "execute_code" {
+		t.Errorf("tool name: want execute_code, got %s", r.ToolCalls[0].Function.Name)
+	}
+}
+
 func TestTransform_LiteralNewlinesInCode(t *testing.T) {
 	// Model generates Python code with literal (unescaped) newlines inside the JSON string —
 	// invalid JSON that we must repair before parsing.
