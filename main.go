@@ -486,7 +486,7 @@ func applyToolCallTransform(body []byte) ([]byte, error) {
 					// string literals like "\"text\"" without escaping their outer delimiters.
 					repaired2 := repairUnescapedQuotes(repaired)
 					if err3 := tryDecode(repaired2); err3 != nil {
-						slog.Warn("failed to parse tool_call JSON", "err", err3, "raw", raw[:min(len(raw), 400)])
+						slog.Warn("failed to parse tool_call JSON", "err", err3, "raw", raw[:min(len(raw), 600)])
 						continue
 					}
 				}
