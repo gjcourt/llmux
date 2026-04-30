@@ -232,7 +232,7 @@ func handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	slog.Debug("incoming request", "body", string(body[:min(len(body), 300)]))
+	slog.Debug("incoming request", "body", string(body[:min(len(body), 300)]), "stream", requestedStream(body), "len", len(body))
 
 	if hasTools(body) {
 		// vLLM handles tools natively; fall back to ollama with <tool_call> → tool_calls transform.
@@ -307,6 +307,10 @@ func proxyStream(w http.ResponseWriter, r *http.Request, target string, body []b
 // proxyTransform sends body to target, buffers the response, applies the tool-call transform, and writes the result.
 // originalBody is the pre-forceNoStream request body; it's used to retry as plain chat if the model returns empty.
 func proxyTransform(w http.ResponseWriter, r *http.Request, target string, body []byte, originalBody []byte) {
+	proxyTransformInner(w, r, target, body, originalBody, false)
+}
+
+func proxyTransformInner(w http.ResponseWriter, r *http.Request, target string, body []byte, originalBody []byte, isRetry bool) {
 	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, target, bytes.NewReader(body))
 	if err != nil {
 		http.Error(w, "failed to create upstream request", http.StatusInternalServerError)
@@ -343,10 +347,14 @@ func proxyTransform(w http.ResponseWriter, r *http.Request, target string, body 
 	slog.Debug("transform result", "raw", string(respBody[:min(len(respBody), 500)]), "transformed", string(transformed[:min(len(transformed), 500)]))
 
 	// Ollama sometimes returns empty content when tools are present but not needed.
-	// Retry as plain chat (no tools) so the model can respond conversationally.
-	if isEmptyNonToolResponse(transformed) {
+	// Retry without tools so the model can respond conversationally. Use the
+	// transform path (not proxyStream) so any <tool_call> XML in the retry
+	// response is still extracted and sent as proper SSE tool_calls.
+	// isRetry guard prevents infinite recursion if the model returns empty twice.
+	if isEmptyNonToolResponse(transformed) && !isRetry {
 		slog.Warn("ollama returned empty response with tools, retrying as plain chat")
-		proxyStream(w, r, target, stripTools(originalBody))
+		stripped := stripTools(originalBody)
+		proxyTransformInner(w, r, target, forceNoStream(stripped), stripped, true)
 		return
 	}
 
@@ -438,16 +446,17 @@ func applyToolCallTransform(body []byte) ([]byte, error) {
 				Name      string          `json:"name"`
 				Arguments json.RawMessage `json:"arguments"`
 			}
-			if err := json.Unmarshal([]byte(raw), &tc); err != nil {
+			// Use Decoder instead of Unmarshal so trailing garbage after a
+			// valid JSON object (comments, Python continuations, etc.) is ignored.
+			tryDecode := func(s string) error {
+				return json.NewDecoder(strings.NewReader(s)).Decode(&tc)
+			}
+			if err := tryDecode(raw); err != nil {
 				// Models sometimes emit literal newlines inside JSON strings (invalid JSON).
 				// Repair by escaping control characters within string values and retry.
-				if repaired := repairJSONStrings(raw); repaired != raw {
-					if err2 := json.Unmarshal([]byte(repaired), &tc); err2 != nil {
-						slog.Warn("failed to parse tool_call JSON after repair", "err", err2)
-						continue
-					}
-				} else {
-					slog.Warn("failed to parse tool_call JSON", "err", err)
+				repaired := repairJSONStrings(raw)
+				if err2 := tryDecode(repaired); err2 != nil {
+					slog.Warn("failed to parse tool_call JSON", "err", err2, "raw", raw[:min(len(raw), 400)])
 					continue
 				}
 			}
@@ -489,8 +498,10 @@ func randomCallID(idx int) string {
 	return fmt.Sprintf("call_%s%d", hex.EncodeToString(b), idx)
 }
 
-// repairJSONStrings escapes bare control characters (newlines, tabs, carriage returns)
-// that appear inside JSON string values. Models often emit these literally in code arguments.
+// repairJSONStrings fixes two classes of model-generated JSON errors inside string values:
+//  1. Literal control characters (newlines, tabs, carriage returns) → escape them.
+//  2. Invalid escape sequences (e.g. \s \d \w from Python regex) → double the backslash
+//     so \s becomes \\s, which JSON decodes back to \s (the regex metachar).
 func repairJSONStrings(s string) string {
 	var b strings.Builder
 	inString := false
@@ -499,7 +510,20 @@ func repairJSONStrings(s string) string {
 	for _, c := range s {
 		if escaped {
 			escaped = false
-			b.WriteRune(c)
+			if inString {
+				switch c {
+				case '"', '\\', '/', 'b', 'f', 'n', 'r', 't', 'u':
+					// Valid JSON escape — the leading backslash was already written.
+					b.WriteRune(c)
+				default:
+					// Invalid JSON escape (e.g. \s \d \w \1 from Python) — escape
+					// the backslash we already wrote so \X becomes \\X.
+					b.WriteRune('\\')
+					b.WriteRune(c)
+				}
+			} else {
+				b.WriteRune(c)
+			}
 			continue
 		}
 		if c == '\\' {
