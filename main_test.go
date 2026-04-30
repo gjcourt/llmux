@@ -2,6 +2,8 @@ package main
 
 import (
 	"encoding/json"
+	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -226,6 +228,7 @@ func TestTransform_MultipleToolCalls(t *testing.T) {
 func TestTransform_ContentWithPreamble(t *testing.T) {
 	t.Parallel()
 	// Model says something before calling a tool.
+	// Per OpenAI spec, content must be null when tool_calls are present.
 	input := ollamaResp("Let me look that up.\n<tool_call>{\"name\":\"f\",\"arguments\":{}}</tool_call>")
 	out, err := applyToolCallTransform(input)
 	if err != nil {
@@ -233,8 +236,8 @@ func TestTransform_ContentWithPreamble(t *testing.T) {
 	}
 	r := parseTransform(t, out)
 
-	if r.Content == nil || *r.Content != "Let me look that up." {
-		t.Errorf("want preamble content, got %v", r.Content)
+	if r.Content != nil {
+		t.Errorf("content must be null when tool_calls present, got %q", *r.Content)
 	}
 	if len(r.ToolCalls) != 1 {
 		t.Errorf("want 1 tool call, got %d", len(r.ToolCalls))
@@ -292,6 +295,45 @@ func TestTransform_InvalidTopLevelJSON(t *testing.T) {
 	}
 }
 
+func TestTransform_LiteralNewlinesInCode(t *testing.T) {
+	// Model generates Python code with literal (unescaped) newlines inside the JSON string —
+	// invalid JSON that we must repair before parsing.
+	rawContent := "<tool_call>\n{\"name\": \"execute_code\", \"arguments\": {\"code\": \"import os\nprint(os.getcwd())\n\"}}\n</tool_call>"
+	input := ollamaResp(rawContent)
+	out, err := applyToolCallTransform(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := parseTransform(t, out)
+
+	if r.FinishReason != "tool_calls" {
+		t.Errorf("finish_reason: want tool_calls, got %s", r.FinishReason)
+	}
+	if len(r.ToolCalls) != 1 {
+		t.Fatalf("want 1 tool call, got %d — literal newlines in JSON not repaired", len(r.ToolCalls))
+	}
+	if r.ToolCalls[0].Function.Name != "execute_code" {
+		t.Errorf("tool name: want execute_code, got %s", r.ToolCalls[0].Function.Name)
+	}
+}
+
+func TestTransform_AllToolCallsParseFail_FinishReasonNotOverridden(t *testing.T) {
+	// If every <tool_call> fails to parse, finish_reason must stay "stop" —
+	// never emit finish_reason:"tool_calls" with an empty tool_calls array.
+	input := ollamaResp("<tool_call>COMPLETELY INVALID</tool_call>")
+	out, err := applyToolCallTransform(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := parseTransform(t, out)
+	if r.FinishReason == "tool_calls" {
+		t.Error("finish_reason must not be tool_calls when no tool calls were successfully parsed")
+	}
+	if len(r.ToolCalls) != 0 {
+		t.Errorf("want 0 tool calls, got %d", len(r.ToolCalls))
+	}
+}
+
 // --- stripTools ---
 
 func TestStripTools_RemovesTools(t *testing.T) {
@@ -342,5 +384,174 @@ func TestIsEmptyNonToolResponse_WithToolCalls(t *testing.T) {
 	transformed, _ := applyToolCallTransform(input)
 	if isEmptyNonToolResponse(transformed) {
 		t.Fatal("response with tool_calls should not be considered empty")
+	}
+}
+
+// --- requestedStream ---
+
+func TestRequestedStream_True(t *testing.T) {
+	if !requestedStream([]byte(`{"model":"x","stream":true}`)) {
+		t.Fatal("expected requestedStream=true")
+	}
+}
+
+func TestRequestedStream_False(t *testing.T) {
+	if requestedStream([]byte(`{"model":"x","stream":false}`)) {
+		t.Fatal("expected requestedStream=false")
+	}
+}
+
+func TestRequestedStream_Absent(t *testing.T) {
+	if requestedStream([]byte(`{"model":"x"}`)) {
+		t.Fatal("expected requestedStream=false when field absent")
+	}
+}
+
+// --- writeAsSSE ---
+
+// parseSSEEvents splits an SSE body into the data payloads (strips "data: " prefix and blank lines).
+func parseSSEEvents(body string) []string {
+	var events []string
+	for _, line := range strings.Split(body, "\n") {
+		line = strings.TrimRight(line, "\r")
+		if strings.HasPrefix(line, "data: ") {
+			events = append(events, strings.TrimPrefix(line, "data: "))
+		}
+	}
+	return events
+}
+
+func TestWriteAsSSE_ToolCall(t *testing.T) {
+	input := ollamaResp(`<tool_call>{"name":"web_search","arguments":{"query":"cats"}}</tool_call>`)
+	transformed, err := applyToolCallTransform(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rr := httptest.NewRecorder()
+	writeAsSSE(rr, transformed)
+
+	events := parseSSEEvents(rr.Body.String())
+	if len(events) == 0 {
+		t.Fatal("no SSE events emitted")
+	}
+	if events[len(events)-1] != "[DONE]" {
+		t.Errorf("last event should be [DONE], got %q", events[len(events)-1])
+	}
+
+	// Collect tool_call deltas.
+	var toolCallName, toolCallArgs string
+	for _, ev := range events {
+		if ev == "[DONE]" {
+			continue
+		}
+		var chunk sseChunk
+		if err := json.Unmarshal([]byte(ev), &chunk); err != nil {
+			t.Fatalf("invalid SSE JSON: %v\nevent: %s", err, ev)
+		}
+		if len(chunk.Choices) == 0 {
+			continue
+		}
+		for _, tc := range chunk.Choices[0].Delta.ToolCalls {
+			if tc.Function != nil {
+				toolCallName += tc.Function.Name
+				toolCallArgs += tc.Function.Arguments
+			}
+		}
+	}
+	if toolCallName != "web_search" {
+		t.Errorf("tool name: want web_search, got %q", toolCallName)
+	}
+	var args map[string]string
+	if err := json.Unmarshal([]byte(toolCallArgs), &args); err != nil {
+		t.Fatalf("tool arguments not valid JSON: %v", err)
+	}
+	if args["query"] != "cats" {
+		t.Errorf("tool arg query: want cats, got %q", args["query"])
+	}
+
+	// Final chunk must have finish_reason: tool_calls.
+	var finalChunk sseChunk
+	for _, ev := range events {
+		if ev == "[DONE]" {
+			continue
+		}
+		var ch sseChunk
+		if err := json.Unmarshal([]byte(ev), &ch); err != nil {
+			continue
+		}
+		if len(ch.Choices) > 0 && ch.Choices[0].FinishReason != nil && *ch.Choices[0].FinishReason != "" {
+			finalChunk = ch
+		}
+	}
+	if len(finalChunk.Choices) == 0 || finalChunk.Choices[0].FinishReason == nil || *finalChunk.Choices[0].FinishReason != "tool_calls" {
+		t.Errorf("final chunk finish_reason: want tool_calls, got %+v", finalChunk)
+	}
+}
+
+func TestWriteAsSSE_PlainText(t *testing.T) {
+	input := ollamaResp("Hello there!")
+	// No tool calls, so transform is a no-op pass-through.
+	transformed, _ := applyToolCallTransform(input)
+
+	rr := httptest.NewRecorder()
+	writeAsSSE(rr, transformed)
+
+	events := parseSSEEvents(rr.Body.String())
+	if len(events) == 0 || events[len(events)-1] != "[DONE]" {
+		t.Fatalf("expected [DONE] as last event, got %v", events)
+	}
+
+	var contentSeen string
+	for _, ev := range events {
+		if ev == "[DONE]" {
+			continue
+		}
+		var chunk sseChunk
+		if err := json.Unmarshal([]byte(ev), &chunk); err != nil {
+			t.Fatalf("invalid SSE JSON: %v", err)
+		}
+		if len(chunk.Choices) > 0 && chunk.Choices[0].Delta.Content != nil {
+			contentSeen += *chunk.Choices[0].Delta.Content
+		}
+	}
+	if contentSeen != "Hello there!" {
+		t.Errorf("content: want %q, got %q", "Hello there!", contentSeen)
+	}
+}
+
+func TestWriteAsSSE_MultipleToolCalls(t *testing.T) {
+	input := ollamaResp(
+		`<tool_call>{"name":"a","arguments":{}}</tool_call>` + "\n" +
+			`<tool_call>{"name":"b","arguments":{"x":1}}</tool_call>`,
+	)
+	transformed, err := applyToolCallTransform(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rr := httptest.NewRecorder()
+	writeAsSSE(rr, transformed)
+
+	events := parseSSEEvents(rr.Body.String())
+	names := map[string]bool{}
+	for _, ev := range events {
+		if ev == "[DONE]" {
+			continue
+		}
+		var chunk sseChunk
+		if err := json.Unmarshal([]byte(ev), &chunk); err != nil {
+			t.Fatalf("invalid SSE JSON: %v", err)
+		}
+		if len(chunk.Choices) > 0 {
+			for _, tc := range chunk.Choices[0].Delta.ToolCalls {
+				if tc.Function != nil && tc.Function.Name != "" {
+					names[tc.Function.Name] = true
+				}
+			}
+		}
+	}
+	if !names["a"] || !names["b"] {
+		t.Errorf("expected tool names a and b in SSE events, got %v", names)
 	}
 }
