@@ -208,6 +208,28 @@ func stripTools(body []byte) []byte {
 	return result
 }
 
+// hasToolResultMessages returns true when the request body's messages array
+// contains any role:"tool" message, indicating a tool has already been
+// dispatched and its results injected. Retrying as plain chat in that state
+// produces a mangled history (tool_calls without definitions) that confuses
+// the model.
+func hasToolResultMessages(body []byte) bool {
+	var req struct {
+		Messages []struct {
+			Role string `json:"role"`
+		} `json:"messages"`
+	}
+	if err := json.Unmarshal(body, &req); err != nil {
+		return false
+	}
+	for _, m := range req.Messages {
+		if m.Role == "tool" {
+			return true
+		}
+	}
+	return false
+}
+
 // isEmptyNonToolResponse returns true when the model responded with no content and no tool calls —
 // meaning the model silently gave up rather than answering or calling a tool.
 func isEmptyNonToolResponse(body []byte) bool {
@@ -351,7 +373,10 @@ func proxyTransformInner(w http.ResponseWriter, r *http.Request, target string, 
 	// transform path (not proxyStream) so any <tool_call> XML in the retry
 	// response is still extracted and sent as proper SSE tool_calls.
 	// isRetry guard prevents infinite recursion if the model returns empty twice.
-	if isEmptyNonToolResponse(transformed) && !isRetry {
+	// Don't retry if the history already has tool results — stripping tools from
+	// a conversation with role:"tool" messages produces a mangled history that
+	// causes the model to hallucinate partial <tool_call> fragments.
+	if isEmptyNonToolResponse(transformed) && !isRetry && !hasToolResultMessages(originalBody) {
 		slog.Warn("ollama returned empty response with tools, retrying as plain chat")
 		stripped := stripTools(originalBody)
 		proxyTransformInner(w, r, target, forceNoStream(stripped), stripped, true)

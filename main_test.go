@@ -406,6 +406,22 @@ func TestIsEmptyNonToolResponse_WithToolCalls(t *testing.T) {
 	}
 }
 
+// --- hasToolResultMessages ---
+
+func TestHasToolResultMessages_WithToolRole(t *testing.T) {
+	body := `{"messages":[{"role":"user","content":"hi"},{"role":"assistant","content":"","tool_calls":[{"id":"c1","type":"function","function":{"name":"f","arguments":"{}"}}]},{"role":"tool","tool_call_id":"c1","content":"result"}]}`
+	if !hasToolResultMessages([]byte(body)) {
+		t.Fatal("expected true when role:tool present")
+	}
+}
+
+func TestHasToolResultMessages_NoToolRole(t *testing.T) {
+	body := `{"messages":[{"role":"user","content":"hi"}]}`
+	if hasToolResultMessages([]byte(body)) {
+		t.Fatal("expected false when no role:tool")
+	}
+}
+
 // --- requestedStream ---
 
 func TestRequestedStream_True(t *testing.T) {
@@ -703,5 +719,30 @@ func TestProxyTransform_EmptyRetryDoesNotLoop(t *testing.T) {
 
 	if calls != 2 {
 		t.Errorf("expected exactly 2 upstream calls (original + one retry), got %d", calls)
+	}
+}
+
+// TestProxyTransform_NoRetryAfterToolResults verifies that an empty response from
+// the model is NOT retried when the conversation history already contains role:"tool"
+// messages. Stripping tools from such a history creates a mangled context that makes
+// the model hallucinate partial <tool_call> fragments.
+func TestProxyTransform_NoRetryAfterToolResults(t *testing.T) {
+	calls := 0
+	upstream := fakeOllama(func(callN int, w http.ResponseWriter) {
+		calls++
+		writeOllamaResp(w, "") // empty response after tool result
+	})
+	defer upstream.Close()
+
+	// originalBody has a role:"tool" message in history — tools have already been dispatched.
+	originalBody := []byte(`{"model":"test","messages":[{"role":"user","content":"hi"},{"role":"assistant","content":null,"tool_calls":[{"id":"c1","type":"function","function":{"name":"f","arguments":"{}"}}]},{"role":"tool","tool_call_id":"c1","content":"result"}],"tools":[{"type":"function","function":{"name":"f","parameters":{"type":"object"}}}],"stream":true}`)
+	req := httptest.NewRequest("POST", "/v1/chat/completions", bytes.NewReader(originalBody))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+
+	proxyTransformInner(rr, req, upstream.URL, forceNoStream(originalBody), originalBody, false)
+
+	if calls != 1 {
+		t.Errorf("expected exactly 1 upstream call (no retry after tool results), got %d", calls)
 	}
 }
