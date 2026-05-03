@@ -1,3 +1,3 @@
 module github.com/gjcourt/llmux
 
-go 1.25.0
+go 1.24
