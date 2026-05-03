@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
@@ -12,12 +13,15 @@ import (
 	"os"
 	"regexp"
 	"strings"
+	"time"
 )
 
 var (
 	addr      = getenv("LLMUX_ADDR", ":8080")
 	vllmURL   = getenv("LLMUX_VLLM_URL", "http://10.42.2.10:8000")
 	ollamaURL = getenv("LLMUX_OLLAMA_URL", "http://10.42.2.10:30068/v1")
+
+	httpClient = &http.Client{Timeout: 120 * time.Second}
 )
 
 func getenv(key, fallback string) string {
@@ -132,7 +136,7 @@ func proxyStream(w http.ResponseWriter, r *http.Request, target string, body []b
 		req.Header.Set("Content-Type", "application/json")
 	}
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		slog.Error("upstream unreachable", "target", target, "err", err)
 		return false
@@ -186,7 +190,7 @@ func proxyTransform(w http.ResponseWriter, r *http.Request, target string, body 
 		req.Header.Set("Content-Type", "application/json")
 	}
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		slog.Error("upstream unreachable", "target", target, "err", err)
 		http.Error(w, "upstream request failed", http.StatusBadGateway)
@@ -236,9 +240,9 @@ type openAIResponse struct {
 }
 
 type openAIChoice struct {
-	Index        int        `json:"index"`
-	Message      openAIMsg  `json:"message"`
-	FinishReason string     `json:"finish_reason"`
+	Index        int       `json:"index"`
+	Message      openAIMsg `json:"message"`
+	FinishReason string    `json:"finish_reason"`
 }
 
 type openAIMsg struct {
@@ -274,11 +278,15 @@ func applyToolCallTransform(body []byte) ([]byte, error) {
 		content := *choice.Message.Content
 
 		// Strip thinking tokens.
-		content = reThink.ReplaceAllString(content, "")
+		stripped := reThink.ReplaceAllString(content, "")
 
-		matches := reToolCall.FindAllStringSubmatch(content, -1)
+		matches := reToolCall.FindAllStringSubmatch(stripped, -1)
 		if len(matches) == 0 {
-			resp.Choices[i].Message.Content = strPtr(strings.TrimSpace(content))
+			if stripped != content {
+				// Think tags were present; update the choice even though no tool calls found.
+				resp.Choices[i].Message.Content = strPtr(strings.TrimSpace(stripped))
+				changed = true
+			}
 			continue
 		}
 
@@ -292,18 +300,17 @@ func applyToolCallTransform(body []byte) ([]byte, error) {
 				slog.Warn("failed to parse tool_call JSON", "err", err)
 				continue
 			}
-			argStr, _ := json.Marshal(tc.Arguments)
 			calls = append(calls, openAIToolCall{
 				ID:   randomCallID(j),
 				Type: "function",
 				Function: openAIToolFunction{
 					Name:      tc.Name,
-					Arguments: string(argStr),
+					Arguments: string(tc.Arguments),
 				},
 			})
 		}
 
-		remaining := strings.TrimSpace(reToolCall.ReplaceAllString(content, ""))
+		remaining := strings.TrimSpace(reToolCall.ReplaceAllString(stripped, ""))
 		if remaining == "" {
 			resp.Choices[i].Message.Content = nil
 		} else {
@@ -324,13 +331,14 @@ func strPtr(s string) *string { return &s }
 
 func randomCallID(idx int) string {
 	b := make([]byte, 4)
-	rand.Read(b) //nolint:errcheck
+	rand.Read(b) //nolint:errcheck // crypto/rand.Read never returns an error since Go 1.20
 	return fmt.Sprintf("call_%s%d", hex.EncodeToString(b), idx)
 }
 
 func handleModels(w http.ResponseWriter, r *http.Request) {
-	vllmModels := fetchModels(vllmURL + "/v1/models")
-	ollamaModels := fetchModels(ollamaURL + "/models")
+	ctx := r.Context()
+	vllmModels := fetchModels(ctx, vllmURL+"/v1/models")
+	ollamaModels := fetchModels(ctx, ollamaURL+"/models")
 
 	merged := map[string]any{
 		"object": "list",
@@ -340,8 +348,13 @@ func handleModels(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(merged) //nolint:errcheck
 }
 
-func fetchModels(url string) []json.RawMessage {
-	resp, err := http.Get(url)
+func fetchModels(ctx context.Context, url string) []json.RawMessage {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		slog.Warn("failed to create models request", "url", url, "err", err)
+		return nil
+	}
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		slog.Warn("failed to fetch models", "url", url, "err", err)
 		return nil
