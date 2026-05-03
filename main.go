@@ -24,8 +24,11 @@ var (
 	httpClient = &http.Client{Timeout: 120 * time.Second}
 )
 
+// getenv returns the env var value if set (including empty string) so an explicit
+// empty value can disable a backend per AGENTS.md. Only an unset variable falls
+// back to the default.
 func getenv(key, fallback string) string {
-	if v := os.Getenv(key); v != "" {
+	if v, ok := os.LookupEnv(key); ok {
 		return v
 	}
 	return fallback
@@ -105,18 +108,37 @@ func handleChat(w http.ResponseWriter, r *http.Request) {
 
 	if hasTools(body) {
 		// vLLM handles tools natively; fall back to ollama with <tool_call> → tool_calls transform.
-		slog.Info("routing to vllm (has tools)", "path", r.URL.Path)
-		if proxyStream(w, r, vllmURL+"/v1/chat/completions", body) {
+		if vllmURL != "" {
+			slog.Info("routing to vllm (has tools)", "path", r.URL.Path)
+			if proxyStream(w, r, vllmURL+"/v1/chat/completions", body) {
+				return
+			}
+			slog.Warn("vLLM unavailable, falling back to ollama with tool transform")
+		} else {
+			slog.Info("vllm disabled, routing tools request to ollama with transform", "path", r.URL.Path)
+		}
+		if ollamaURL == "" {
+			http.Error(w, "no backends available", http.StatusServiceUnavailable)
 			return
 		}
-		slog.Warn("vLLM unavailable, falling back to ollama with tool transform")
 		proxyTransform(w, r, ollamaURL+"/chat/completions", forceNoStream(body), body)
 	} else {
-		slog.Info("routing to ollama", "path", r.URL.Path)
-		if proxyStream(w, r, ollamaURL+"/chat/completions", body) {
+		// No-tools path still needs the transform stage so <think> blocks are stripped
+		// before returning to the client (per AGENTS.md architecture).
+		if ollamaURL != "" {
+			slog.Info("routing to ollama", "path", r.URL.Path)
+			if proxyTransformOK(w, r, ollamaURL+"/chat/completions", forceNoStream(body), body) {
+				return
+			}
+			slog.Warn("ollama unavailable, falling back to vllm with transform")
+		} else {
+			slog.Info("ollama disabled, routing to vllm with transform", "path", r.URL.Path)
+		}
+		if vllmURL == "" {
+			http.Error(w, "no backends available", http.StatusServiceUnavailable)
 			return
 		}
-		proxyStream(w, r, vllmURL+"/v1/chat/completions", body)
+		proxyTransform(w, r, vllmURL+"/v1/chat/completions", forceNoStream(body), body)
 	}
 }
 
@@ -175,11 +197,20 @@ func proxyStream(w http.ResponseWriter, r *http.Request, target string, body []b
 
 // proxyTransform sends body to target, buffers the response, applies the tool-call transform, and writes the result.
 // originalBody is the pre-forceNoStream request body; it's used to retry as plain chat if the model returns empty.
+// Connection failures emit a 502 to the client.
 func proxyTransform(w http.ResponseWriter, r *http.Request, target string, body []byte, originalBody []byte) {
+	if !proxyTransformOK(w, r, target, body, originalBody) {
+		http.Error(w, "upstream request failed", http.StatusBadGateway)
+	}
+}
+
+// proxyTransformOK is like proxyTransform but returns false on a connection error
+// without writing to w, so the caller can attempt a fallback. Once any byte has
+// been written to w (success path or upstream-status-with-body), it returns true.
+func proxyTransformOK(w http.ResponseWriter, r *http.Request, target string, body []byte, originalBody []byte) bool {
 	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, target, bytes.NewReader(body))
 	if err != nil {
-		http.Error(w, "failed to create upstream request", http.StatusInternalServerError)
-		return
+		return false
 	}
 	for _, h := range []string{"Content-Type", "Authorization", "Accept"} {
 		if v := r.Header.Get(h); v != "" {
@@ -193,15 +224,14 @@ func proxyTransform(w http.ResponseWriter, r *http.Request, target string, body 
 	resp, err := httpClient.Do(req)
 	if err != nil {
 		slog.Error("upstream unreachable", "target", target, "err", err)
-		http.Error(w, "upstream request failed", http.StatusBadGateway)
-		return
+		return false
 	}
 	defer resp.Body.Close()
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
 		http.Error(w, "failed to read upstream response", http.StatusBadGateway)
-		return
+		return true
 	}
 
 	transformed, err := applyToolCallTransform(respBody)
@@ -213,15 +243,49 @@ func proxyTransform(w http.ResponseWriter, r *http.Request, target string, body 
 
 	// Ollama sometimes returns empty content when tools are present but not needed.
 	// Retry as plain chat (no tools) so the model can respond conversationally.
+	// Force stream:false so the empty-check semantics stay consistent on retry.
 	if isEmptyNonToolResponse(transformed) {
-		slog.Warn("ollama returned empty response with tools, retrying as plain chat")
-		proxyStream(w, r, target, stripTools(originalBody))
-		return
+		slog.Warn("upstream returned empty response with tools, retrying as plain chat")
+		retryBody := forceNoStream(stripTools(originalBody))
+		retryReq, rerr := http.NewRequestWithContext(r.Context(), http.MethodPost, target, bytes.NewReader(retryBody))
+		if rerr != nil {
+			http.Error(w, "failed to create retry request", http.StatusInternalServerError)
+			return true
+		}
+		for _, h := range []string{"Content-Type", "Authorization", "Accept"} {
+			if v := r.Header.Get(h); v != "" {
+				retryReq.Header.Set(h, v)
+			}
+		}
+		if retryReq.Header.Get("Content-Type") == "" {
+			retryReq.Header.Set("Content-Type", "application/json")
+		}
+		retryResp, rerr := httpClient.Do(retryReq)
+		if rerr != nil {
+			slog.Error("retry upstream unreachable", "target", target, "err", rerr)
+			http.Error(w, "upstream retry failed", http.StatusBadGateway)
+			return true
+		}
+		defer retryResp.Body.Close()
+		retryRespBody, rerr := io.ReadAll(retryResp.Body)
+		if rerr != nil {
+			http.Error(w, "failed to read retry response", http.StatusBadGateway)
+			return true
+		}
+		retryTransformed, terr := applyToolCallTransform(retryRespBody)
+		if terr != nil {
+			retryTransformed = retryRespBody
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(retryResp.StatusCode)
+		w.Write(retryTransformed) //nolint:errcheck
+		return true
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(resp.StatusCode)
 	w.Write(transformed) //nolint:errcheck
+	return true
 }
 
 var (
@@ -337,8 +401,13 @@ func randomCallID(idx int) string {
 
 func handleModels(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	vllmModels := fetchModels(ctx, vllmURL+"/v1/models")
-	ollamaModels := fetchModels(ctx, ollamaURL+"/models")
+	var vllmModels, ollamaModels []json.RawMessage
+	if vllmURL != "" {
+		vllmModels = fetchModels(ctx, vllmURL+"/v1/models")
+	}
+	if ollamaURL != "" {
+		ollamaModels = fetchModels(ctx, ollamaURL+"/models")
+	}
 
 	merged := map[string]any{
 		"object": "list",
