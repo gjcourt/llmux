@@ -93,8 +93,13 @@ jobs:
       - name: Check go mod tidy
         run: |
           go mod tidy
-          if ! git diff --quiet go.mod go.sum; then
-            echo "go.mod or go.sum out of sync — run 'go mod tidy'"
-            git diff go.mod go.sum
+          if ! git diff --quiet -- go.mod; then
+            echo "go.mod out of sync — run 'go mod tidy'"
+            git diff -- go.mod
+            exit 1
+          fi
+          if [ -f go.sum ] && ! git diff --quiet -- go.sum; then
+            echo "go.sum out of sync — run 'go mod tidy'"
+            git diff -- go.sum
             exit 1
           fi
