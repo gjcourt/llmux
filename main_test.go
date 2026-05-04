@@ -7,30 +7,31 @@ import (
 
 // --- hasTools ---
 
-func TestHasTools_WithTools(t *testing.T) {
-	body := `{"model":"x","tools":[{"type":"function","function":{"name":"f"}}]}`
-	if !hasTools([]byte(body)) {
-		t.Fatal("expected hasTools=true")
+func TestHasTools(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name string
+		body string
+		want bool
+	}{
+		{"with tools", `{"model":"x","tools":[{"type":"function","function":{"name":"f"}}]}`, true},
+		{"empty tools array", `{"model":"x","tools":[]}`, false},
+		{"no tools key", `{"model":"x","messages":[]}`, false},
 	}
-}
-
-func TestHasTools_EmptyTools(t *testing.T) {
-	body := `{"model":"x","tools":[]}`
-	if hasTools([]byte(body)) {
-		t.Fatal("expected hasTools=false for empty tools array")
-	}
-}
-
-func TestHasTools_NoTools(t *testing.T) {
-	body := `{"model":"x","messages":[]}`
-	if hasTools([]byte(body)) {
-		t.Fatal("expected hasTools=false when tools key absent")
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := hasTools([]byte(tt.body)); got != tt.want {
+				t.Errorf("hasTools = %v, want %v", got, tt.want)
+			}
+		})
 	}
 }
 
 // --- forceNoStream ---
 
 func TestForceNoStream_AddsField(t *testing.T) {
+	t.Parallel()
 	body := `{"model":"x"}`
 	out := forceNoStream([]byte(body))
 	var m map[string]json.RawMessage
@@ -43,6 +44,7 @@ func TestForceNoStream_AddsField(t *testing.T) {
 }
 
 func TestForceNoStream_OverridesTrue(t *testing.T) {
+	t.Parallel()
 	body := `{"model":"x","stream":true}`
 	out := forceNoStream([]byte(body))
 	var m map[string]json.RawMessage
@@ -98,6 +100,7 @@ func parseTransform(t *testing.T, body []byte) transformResult {
 }
 
 func TestTransform_SingleToolCall(t *testing.T) {
+	t.Parallel()
 	input := ollamaResp(`<tool_call>{"name":"web_search","arguments":{"query":"cats"}}</tool_call>`)
 	out, err := applyToolCallTransform(input)
 	if err != nil {
@@ -131,6 +134,7 @@ func TestTransform_SingleToolCall(t *testing.T) {
 }
 
 func TestTransform_StripCloseThinkTag(t *testing.T) {
+	t.Parallel()
 	// Ollama strips <think>...</think> content but leaves the </think> closing tag.
 	input := ollamaResp("</think>\n\n<tool_call>{\"name\":\"f\",\"arguments\":{}}</tool_call>")
 	out, err := applyToolCallTransform(input)
@@ -148,6 +152,7 @@ func TestTransform_StripCloseThinkTag(t *testing.T) {
 }
 
 func TestTransform_StripFullThinkBlock(t *testing.T) {
+	t.Parallel()
 	input := ollamaResp("<think>reasoning here</think>\n<tool_call>{\"name\":\"f\",\"arguments\":{}}</tool_call>")
 	out, err := applyToolCallTransform(input)
 	if err != nil {
@@ -163,7 +168,43 @@ func TestTransform_StripFullThinkBlock(t *testing.T) {
 	}
 }
 
+// TestTransform_StripThinkNoToolCall verifies that <think> stripping works
+// even when the model responds conversationally (no tool calls).
+func TestTransform_StripThinkNoToolCall(t *testing.T) {
+	t.Parallel()
+	input := ollamaResp("<think>internal reasoning</think>\nHello! How can I help?")
+	out, err := applyToolCallTransform(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := parseTransform(t, out)
+
+	if r.Content == nil || *r.Content != "Hello! How can I help?" {
+		t.Errorf("want think-stripped content, got %v", r.Content)
+	}
+	if len(r.ToolCalls) != 0 {
+		t.Errorf("want no tool calls, got %d", len(r.ToolCalls))
+	}
+	if r.FinishReason != "stop" {
+		t.Errorf("finish_reason should remain stop, got %s", r.FinishReason)
+	}
+}
+
+func TestTransform_StripOrphanCloseThinkNoToolCall(t *testing.T) {
+	t.Parallel()
+	input := ollamaResp("</think>Hello!")
+	out, err := applyToolCallTransform(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := parseTransform(t, out)
+	if r.Content == nil || *r.Content != "Hello!" {
+		t.Errorf("want orphan </think> stripped, got %v", r.Content)
+	}
+}
+
 func TestTransform_MultipleToolCalls(t *testing.T) {
+	t.Parallel()
 	input := ollamaResp(
 		"<tool_call>{\"name\":\"a\",\"arguments\":{}}</tool_call>\n" +
 			"<tool_call>{\"name\":\"b\",\"arguments\":{\"x\":1}}</tool_call>",
@@ -183,6 +224,7 @@ func TestTransform_MultipleToolCalls(t *testing.T) {
 }
 
 func TestTransform_ContentWithPreamble(t *testing.T) {
+	t.Parallel()
 	// Model says something before calling a tool.
 	input := ollamaResp("Let me look that up.\n<tool_call>{\"name\":\"f\",\"arguments\":{}}</tool_call>")
 	out, err := applyToolCallTransform(input)
@@ -200,6 +242,7 @@ func TestTransform_ContentWithPreamble(t *testing.T) {
 }
 
 func TestTransform_NoToolCall_PassThrough(t *testing.T) {
+	t.Parallel()
 	input := ollamaResp("Hello! How can I help you today?")
 	out, err := applyToolCallTransform(input)
 	if err != nil {
@@ -212,6 +255,7 @@ func TestTransform_NoToolCall_PassThrough(t *testing.T) {
 }
 
 func TestTransform_EmptyContent_PassThrough(t *testing.T) {
+	t.Parallel()
 	input := ollamaResp("")
 	out, err := applyToolCallTransform(input)
 	if err != nil {
@@ -227,6 +271,7 @@ func TestTransform_EmptyContent_PassThrough(t *testing.T) {
 }
 
 func TestTransform_MalformedToolCallJSON(t *testing.T) {
+	t.Parallel()
 	// Malformed JSON inside <tool_call> — should not panic, tool is skipped.
 	input := ollamaResp("<tool_call>not json</tool_call>")
 	out, err := applyToolCallTransform(input)
@@ -240,6 +285,7 @@ func TestTransform_MalformedToolCallJSON(t *testing.T) {
 }
 
 func TestTransform_InvalidTopLevelJSON(t *testing.T) {
+	t.Parallel()
 	_, err := applyToolCallTransform([]byte("not json"))
 	if err == nil {
 		t.Fatal("expected error for invalid JSON input")
@@ -249,6 +295,7 @@ func TestTransform_InvalidTopLevelJSON(t *testing.T) {
 // --- stripTools ---
 
 func TestStripTools_RemovesTools(t *testing.T) {
+	t.Parallel()
 	body := `{"model":"x","tools":[{"type":"function"}],"tool_choice":"auto","messages":[]}`
 	out := stripTools([]byte(body))
 	var m map[string]json.RawMessage
@@ -268,19 +315,28 @@ func TestStripTools_RemovesTools(t *testing.T) {
 
 // --- isEmptyNonToolResponse ---
 
-func TestIsEmptyNonToolResponse_EmptyContent(t *testing.T) {
-	if !isEmptyNonToolResponse(ollamaResp("")) {
-		t.Fatal("empty content should be detected as empty")
+func TestIsEmptyNonToolResponse(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name  string
+		input []byte
+		want  bool
+	}{
+		{"empty content", ollamaResp(""), true},
+		{"plain text", ollamaResp("Hello!"), false},
 	}
-}
-
-func TestIsEmptyNonToolResponse_PlainText(t *testing.T) {
-	if isEmptyNonToolResponse(ollamaResp("Hello!")) {
-		t.Fatal("non-empty content should not be empty")
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			if got := isEmptyNonToolResponse(tt.input); got != tt.want {
+				t.Errorf("isEmptyNonToolResponse = %v, want %v", got, tt.want)
+			}
+		})
 	}
 }
 
 func TestIsEmptyNonToolResponse_WithToolCalls(t *testing.T) {
+	t.Parallel()
 	// A properly transformed response with tool_calls should never be "empty".
 	input := ollamaResp(`<tool_call>{"name":"f","arguments":{}}</tool_call>`)
 	transformed, _ := applyToolCallTransform(input)
