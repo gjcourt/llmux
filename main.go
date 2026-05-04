@@ -94,7 +94,7 @@ func writeAsSSE(w http.ResponseWriter, body []byte) {
 	flusher, canFlush := w.(http.Flusher)
 	emit := func(v any) {
 		b, _ := json.Marshal(v)
-		fmt.Fprintf(w, "data: %s\n\n", b)
+		fmt.Fprintf(w, "data: %s\n\n", b) //nolint:errcheck
 		if canFlush {
 			flusher.Flush()
 		}
@@ -102,7 +102,7 @@ func writeAsSSE(w http.ResponseWriter, body []byte) {
 
 	var resp openAIResponse
 	if err := json.Unmarshal(body, &resp); err != nil {
-		fmt.Fprint(w, "data: [DONE]\n\n")
+		fmt.Fprint(w, "data: [DONE]\n\n") //nolint:errcheck
 		if canFlush {
 			flusher.Flush()
 		}
@@ -113,7 +113,7 @@ func writeAsSSE(w http.ResponseWriter, body []byte) {
 	var nullFR *string
 
 	if len(resp.Choices) == 0 {
-		fmt.Fprint(w, "data: [DONE]\n\n")
+		fmt.Fprint(w, "data: [DONE]\n\n") //nolint:errcheck
 		if canFlush {
 			flusher.Flush()
 		}
@@ -170,7 +170,7 @@ func writeAsSSE(w http.ResponseWriter, body []byte) {
 		emit(chunk)
 	}
 
-	fmt.Fprint(w, "data: [DONE]\n\n")
+	fmt.Fprint(w, "data: [DONE]\n\n") //nolint:errcheck
 	if canFlush {
 		flusher.Flush()
 	}
