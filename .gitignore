@@ -1,2 +1,4 @@
 llmux
 *.test
+
+.worktrees/
