@@ -29,6 +29,7 @@ Tests live in `main_test.go`.
 - **Empty env var disables that backend** — `LLMUX_VLLM_URL=` (with nothing) intentionally turns off vLLM routing.
 - **Conventional Commits** for every commit (`feat:`, `fix:`, `chore:`, `refactor:`, `docs:`, `test:`, `ci:`).
 - **Branch names** follow `<type>/<description>`.
+- **All changes go through a branch and pull request** — never commit directly to the default branch (`master`); it is protected.
 
 ## Invariants
 
