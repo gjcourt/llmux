@@ -68,6 +68,8 @@ Set either to empty string to disable that backend.
 
 `docs/` taxonomy: `architecture/` · `design/` · `operations/` · `plans/` · `reference/` · `research/`. See each folder's `README.md` for scope. Index: `docs/README.md`.
 
+Start here: [Architecture Overview](docs/architecture/2026-07-25-overview.md) — components, request flow (content-based routing + failover), and the tool-call transform pipeline.
+
 ## Observability
 
 Logs to stderr in slog text format at debug level. No metrics endpoint today.
