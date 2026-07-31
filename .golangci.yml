@@ -7,12 +7,6 @@ formatters:
   enable:
     - gofmt
     - goimports
-  exclusions:
-    rules:
-      - path: _test\.go
-        linters:
-          - goconst
-          - gosec
   settings:
     gofmt:
       simplify: true
@@ -36,6 +30,14 @@ linters:
         - name: if-return
         - name: increment-decrement
         - name: range
+    errcheck:
+      # response-writing calls whose error is conventionally unactionable
+      exclude-functions:
+        - fmt.Fprint
+        - fmt.Fprintf
+        - fmt.Fprintln
+        - (net/http.ResponseWriter).Write
+        - (*encoding/json.Encoder).Encode
 
   exclusions:
     rules:
