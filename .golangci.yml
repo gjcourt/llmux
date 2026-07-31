@@ -7,6 +7,12 @@ formatters:
   enable:
     - gofmt
     - goimports
+  exclusions:
+    rules:
+      - path: _test\.go
+        linters:
+          - goconst
+          - gosec
   settings:
     gofmt:
       simplify: true
