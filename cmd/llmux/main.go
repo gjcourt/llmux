@@ -70,6 +70,18 @@ func run() error {
 	metricsDone := make(chan error, 1)
 	if maddr := envOr("LLMUX_METRICS_ADDR", ":9090"); maddr != "" {
 		metrics := prommetrics.New()
+		// Anthropic's model list is static config; pre-create its series.
+		// vLLM/Ollama serve whatever id they're sent, so theirs can't be.
+		for _, p := range providers {
+			if p.Name() == "anthropic" {
+				ms, _ := p.Models(ctx)
+				ids := make([]string, 0, len(ms))
+				for _, m := range ms {
+					ids = append(ids, m.ID)
+				}
+				metrics.Declare(p.Name(), ids)
+			}
+		}
 		svc.WithMetrics(metrics)
 		mux := http.NewServeMux()
 		mux.Handle("GET /metrics", metrics.Handler())
@@ -102,6 +114,9 @@ func run() error {
 	slog.Info("llmux listening", "addr", ln.Addr().String(), "providers", len(providers))
 	err = serve(ctx, srv, ln, 25*time.Second)
 	stopMetrics() // chat has drained (or failed on its own): metrics go last
+	// A metrics server that failed at runtime makes even a clean shutdown
+	// exit non-zero: the failure was logged when it happened, and the exit
+	// status is where a supervisor looks.
 	return errors.Join(err, <-metricsDone)
 }
 

@@ -57,7 +57,7 @@ All labelled `provider`, `model`.
 |---|---|---|---|
 | `llmux_chat_requests_total` | counter | `stream`, `outcome` | outcome ∈ ok, invalid_request, no_provider, upstream_4xx, upstream_5xx, unavailable, canceled, error — see `outbound.Outcome` for exactly what each covers. The HTTP adapter's own 400/413s happen before routing and aren't counted |
 | `llmux_chat_in_flight` | gauge | | |
-| `llmux_chat_duration_seconds` | histogram | `stream` | request → provider done; 0.25s–8m buckets |
+| `llmux_chat_duration_seconds` | histogram | `stream` | request → answer done, **successful answers only** (fast failures would read as "faster"); 0.25s–8m buckets |
 | `llmux_chat_time_to_first_token_seconds` | histogram | `stream` | first text/tool-call token; search happens before it. For a non-streamed vLLM/Ollama answer it equals the duration |
 | `llmux_tokens_total` | counter | `type` | input (uncached), cache_read, cache_write, output |
 | `llmux_web_searches_total` | counter | | server-side searches run |
@@ -76,7 +76,9 @@ reports what it knows on any failure after `message_start`: every completed
 turn in full, plus the unfinished turn's input (from `message_start`). The
 unfinished turn's *output* is only reported at its end, so a cancelled answer
 undercounts output — typically the smaller share. This matters: pressing Stop
-in Open WebUI is a cancellation.
+in Open WebUI is a cancellation. Such usage travels as a `Partial` event: the
+metering sink records it, the wire encoders drop it, so a client never sees a
+usage chunk that isn't the answer's real accounting.
 
 ## Not included
 

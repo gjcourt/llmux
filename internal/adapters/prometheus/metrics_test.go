@@ -77,7 +77,7 @@ func TestMetrics_NoProvider(t *testing.T) {
 	if v := testutil.ToFloat64(m.requests.WithLabelValues("none", "unrouted", "false", "no_provider")); v != 1 {
 		t.Errorf("requests = %v", v)
 	}
-	if testutil.CollectAndCount(m.inFlight) != 0 || testutil.CollectAndCount(m.duration) != 0 {
+	if testutil.CollectAndCount(m.inFlight) != 0 || testutil.CollectAndCount(m.duration) != 0 { // New pre-creates only the unrouted request series
 		t.Error("an unrouted request must not create in-flight or latency series")
 	}
 }
@@ -97,5 +97,34 @@ func TestMetrics_Handler(t *testing.T) {
 		if !strings.Contains(string(b), want) {
 			t.Errorf("missing %q", want)
 		}
+	}
+}
+
+// Declared series exist at zero before any request, so the first request
+// is visible to increase().
+func TestMetrics_Declare(t *testing.T) {
+	m := New()
+	m.Declare("anthropic", []string{"claude-sonnet-5", "claude-haiku-4-5"})
+	if n := testutil.CollectAndCount(m.requests); n != 2*2*7+2 {
+		t.Errorf("request series = %d, want %d", n, 2*2*7+2)
+	}
+	if n := testutil.CollectAndCount(m.tokens); n != 2*4 {
+		t.Errorf("token series = %d", n)
+	}
+	if v := testutil.ToFloat64(m.requests.WithLabelValues("anthropic", "claude-sonnet-5", "true", "ok")); v != 0 {
+		t.Errorf("declared series must start at 0, got %v", v)
+	}
+	if v := testutil.ToFloat64(m.requests.WithLabelValues("none", "unrouted", "false", "no_provider")); v != 0 {
+		t.Errorf("unrouted series must exist at 0, got %v", v)
+	}
+}
+
+// Only successful answers feed the duration histogram.
+func TestMetrics_DurationOnlyForOK(t *testing.T) {
+	m := New()
+	m.ChatStarted("p", "m")
+	m.ChatFinished(outbound.ChatObservation{Provider: "p", Model: "m", Outcome: outbound.OutcomeUpstream5xx, Duration: time.Second})
+	if n := testutil.CollectAndCount(m.duration); n != 0 {
+		t.Errorf("a failed request created %d duration series", n)
 	}
 }

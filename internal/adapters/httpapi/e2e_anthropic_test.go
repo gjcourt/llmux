@@ -324,3 +324,29 @@ func TestE2E_AnthropicErrorEventAfterStart(t *testing.T) {
 		t.Errorf("stream: %d %s", resp.StatusCode, body)
 	}
 }
+
+// Partial usage from a failed answer is telemetry only: a client that asked
+// for usage must not get a usage chunk ahead of the error.
+func TestE2E_AnthropicPartialUsageNotOnWire(t *testing.T) {
+	srv := fakeAnthropic(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		for _, ev := range []string{
+			`{"type":"message_start","message":{"id":"m","model":"claude-sonnet-5","usage":{"input_tokens":1000}}}`,
+			`{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`,
+			`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"partial"}}`,
+			`{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}`,
+		} {
+			w.Write([]byte("data: " + ev + "\n\n")) //nolint:errcheck
+		}
+	})
+	_, body := post(t, srv, `{"model":"claude-sonnet-5","stream":true,"stream_options":{"include_usage":true},"messages":[{"role":"user","content":"x"}]}`)
+	chunks, _ := sseEvents(t, body)
+	for _, c := range chunks {
+		if c.Usage != nil {
+			t.Fatalf("usage chunk sent for a failed answer: %s", body)
+		}
+	}
+	if chunks[len(chunks)-1].Error == nil {
+		t.Errorf("want the error chunk last: %s", body)
+	}
+}

@@ -88,6 +88,10 @@ type Event struct {
 
 	// Usage
 	Usage Usage
+	// Partial marks a Usage for an answer that failed part-way: what it had
+	// consumed so far, for telemetry. It is not the answer's accounting, so
+	// clients must not be sent it.
+	Partial bool
 
 	// Citation
 	Citation Citation

@@ -570,8 +570,8 @@ func TestProvider_CancelReportsInputConsumed(t *testing.T) {
 		t.Fatalf("got %v", err)
 	}
 	us := rec.kinds(domain.EventUsage)
-	if len(us) != 1 || us[0].Usage.PromptTokens != 3000 || us[0].Usage.CacheReadTokens != 200 {
-		t.Errorf("usage after cancel: %+v", us)
+	if len(us) != 1 || us[0].Usage.PromptTokens != 3000 || us[0].Usage.CacheReadTokens != 200 || !us[0].Partial {
+		t.Errorf("usage after cancel must be reported, marked partial: %+v", us)
 	}
 	if len(rec.kinds(domain.EventFinish)) != 0 {
 		t.Error("a cancelled answer must not report a finish")
@@ -643,5 +643,48 @@ func TestProvider_ResumeSumsUsageBreakdown(t *testing.T) {
 	want := domain.Usage{PromptTokens: 300, CompletionTokens: 10, TotalTokens: 310, CacheReadTokens: 80, CacheWriteTokens: 20, WebSearches: 4}
 	if us := rec.kinds(domain.EventUsage); len(us) != 1 || us[0].Usage != want {
 		t.Errorf("usage: %+v, want %+v", us, want)
+	}
+}
+
+// A malformed stream (usage before message_start) must not emit anything
+// that would commit the response before the error gets its status.
+func TestProvider_NoPartialUsageBeforeStart(t *testing.T) {
+	p := newTestProvider(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Write([]byte(sse(`{"type":"message_delta","delta":{},"usage":{"input_tokens":50,"output_tokens":1}}`, //nolint:errcheck
+			`{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}`)))
+	})
+	rec := &recorder{}
+	err := p.Chat(context.Background(), domain.ChatRequest{Model: "claude-sonnet-5", Messages: []domain.Message{user("x")}}, rec)
+	var ue *domain.UpstreamError
+	if !errors.As(err, &ue) || len(rec.events) != 0 {
+		t.Errorf("err %v, events %+v", err, rec.events)
+	}
+}
+
+type failOnFinish struct{ recorder }
+
+func (f *failOnFinish) Emit(e domain.Event) error {
+	_ = f.recorder.Emit(e)
+	if e.Kind == domain.EventFinish {
+		return errors.New("client gone")
+	}
+	return nil
+}
+
+// A client that leaves between the last token and the finish chunk still
+// leaves the answer's usage recorded.
+func TestProvider_UsageEvenIfFinishWriteFails(t *testing.T) {
+	fixture, _ := os.ReadFile("testdata/plain.sse")
+	p := newTestProvider(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Write(fixture) //nolint:errcheck
+	})
+	rec := &failOnFinish{}
+	if err := p.Chat(context.Background(), domain.ChatRequest{Model: "claude-sonnet-5", Messages: []domain.Message{user("x")}}, rec); err == nil {
+		t.Fatal("want the finish write error")
+	}
+	if us := rec.kinds(domain.EventUsage); len(us) != 1 || us[0].Usage.TotalTokens != 28 {
+		t.Errorf("usage: %+v", us)
 	}
 }

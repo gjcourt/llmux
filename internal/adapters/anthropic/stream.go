@@ -148,10 +148,14 @@ func parseStream(r io.Reader, sink domain.EventSink, created int64) error {
 
 // finish emits the final Finish and Usage events.
 func (st *streamState) finish(sink domain.EventSink, stopReason string) error {
-	if err := sink.Emit(domain.Event{Kind: domain.EventFinish, FinishReason: finishReason(stopReason)}); err != nil {
-		return err
+	ferr := sink.Emit(domain.Event{Kind: domain.EventFinish, FinishReason: finishReason(stopReason)})
+	// Usage is emitted even when the client is already gone, so telemetry
+	// still counts the (complete, billed) answer.
+	uerr := sink.Emit(domain.Event{Kind: domain.EventUsage, Usage: st.usage})
+	if ferr != nil {
+		return ferr
 	}
-	return sink.Emit(domain.Event{Kind: domain.EventUsage, Usage: st.usage})
+	return uerr
 }
 
 // parseTurn reads one Messages API SSE stream, emitting events as it goes,

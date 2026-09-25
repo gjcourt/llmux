@@ -53,7 +53,7 @@ func New() *Metrics {
 	}, []string{"provider", "model"})
 	m.duration = prometheus.NewHistogramVec(prometheus.HistogramOpts{
 		Name: "llmux_chat_duration_seconds",
-		Help: "Time from request to the provider finishing its answer (or failing).",
+		Help: "Time from request to the provider finishing a successful answer.",
 		// Chat answers stream for seconds to minutes; searched ones longer.
 		Buckets: []float64{0.25, 0.5, 1, 2, 4, 8, 15, 30, 60, 120, 240, 480},
 	}, []string{"provider", "model", "stream"})
@@ -86,7 +86,42 @@ func New() *Metrics {
 	for _, c := range []prometheus.Collector{m.requests, m.inFlight, m.duration, m.ttft, m.tokens, m.searches, m.citations, m.finishes, m.noUsage} {
 		f(c)
 	}
+	// Unrouted requests: the one fixed series (see Declare for why).
+	for _, stream := range []string{"true", "false"} {
+		m.requests.WithLabelValues("none", "unrouted", stream, string(outbound.OutcomeNoProvider))
+	}
 	return m
+}
+
+// Declare creates provider's series for models at zero. A series that first
+// appears already at 1 has no earlier sample, so Prometheus' increase() and
+// rate() can't count that first request — on a low-traffic deployment that
+// loses the first request of every new model/outcome pair. Call it for
+// providers whose models are known up front.
+func (m *Metrics) Declare(provider string, models []string) {
+	outcomes := []outbound.Outcome{
+		outbound.OutcomeOK, outbound.OutcomeInvalidRequest, outbound.OutcomeUpstream4xx, outbound.OutcomeUpstream5xx,
+		outbound.OutcomeUnavailable, outbound.OutcomeCanceled, outbound.OutcomeError,
+	}
+	for _, mo := range models {
+		for _, stream := range []string{"true", "false"} {
+			for _, o := range outcomes {
+				m.requests.WithLabelValues(provider, mo, stream, string(o))
+			}
+			m.duration.WithLabelValues(provider, mo, stream)
+			m.ttft.WithLabelValues(provider, mo, stream)
+		}
+		for _, t := range []string{"input", "cache_read", "cache_write", "output"} {
+			m.tokens.WithLabelValues(provider, mo, t)
+		}
+		for _, r := range []string{"stop", "length", "content_filter"} {
+			m.finishes.WithLabelValues(provider, mo, r)
+		}
+		m.inFlight.WithLabelValues(provider, mo)
+		m.searches.WithLabelValues(provider, mo)
+		m.citations.WithLabelValues(provider, mo)
+		m.noUsage.WithLabelValues(provider, mo)
+	}
 }
 
 // ChatStarted implements outbound.Metrics.
@@ -102,7 +137,11 @@ func (m *Metrics) ChatFinished(o outbound.ChatObservation) {
 		return // nothing was served: no in-flight entry, no latency to speak of
 	}
 	m.inFlight.WithLabelValues(p, mo).Dec()
-	m.duration.WithLabelValues(p, mo, strconv.FormatBool(o.Stream)).Observe(o.Duration.Seconds())
+	if o.Outcome == outbound.OutcomeOK {
+		// Successful answers only: fast 4xx/529s and cancellations would
+		// otherwise drag the percentiles down and read as "faster".
+		m.duration.WithLabelValues(p, mo, strconv.FormatBool(o.Stream)).Observe(o.Duration.Seconds())
+	}
 	if o.TimeToFirstToken > 0 {
 		m.ttft.WithLabelValues(p, mo, strconv.FormatBool(o.Stream)).Observe(o.TimeToFirstToken.Seconds())
 	}
