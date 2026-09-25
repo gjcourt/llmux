@@ -72,6 +72,7 @@ func run() error {
 	}
 
 	svc := app.New(providers...)
+	var authHook func(reason string)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -85,7 +86,7 @@ func run() error {
 	defer stopMetrics()
 	metricsDone := make(chan error, 1)
 	if maddr := envOr("LLMUX_METRICS_ADDR", ":9090"); maddr != "" {
-		metrics := prommetrics.New()
+		metrics := prommetrics.New(clients)
 		// Anthropic's model list is static config; pre-create its series.
 		// vLLM/Ollama serve whatever id they're sent, so theirs can't be.
 		for _, p := range providers {
@@ -98,10 +99,11 @@ func run() error {
 				for _, m := range ms {
 					ids = append(ids, m.ID)
 				}
-				metrics.Declare(clients, p.Name(), ids)
+				metrics.Declare(p.Name(), ids)
 			}
 		}
 		svc.WithMetrics(metrics)
+		authHook = metrics.AuthFailed
 		mux := http.NewServeMux()
 		mux.Handle("GET /metrics", metrics.Handler())
 		mln, err := net.Listen("tcp", maddr)
@@ -123,7 +125,7 @@ func run() error {
 	}
 
 	srv := &http.Server{
-		Handler:           httpapi.New(svc, httpapi.WithClientKeys(clientKeys)),
+		Handler:           httpapi.New(svc, httpapi.WithClientKeys(clientKeys), httpapi.WithAuthFailureHook(authHook)),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	ln, err := net.Listen("tcp", addr)
@@ -240,6 +242,8 @@ func clientKeysFromEnv() (map[string]string, error) {
 			return nil, fmt.Errorf("LLMUX_CLIENT_KEYS: %q is reserved", name)
 		case len(key) < 32:
 			return nil, fmt.Errorf("LLMUX_CLIENT_KEYS: key for %q is shorter than 32 characters", name)
+		case !validClientKey(key):
+			return nil, fmt.Errorf("LLMUX_CLIENT_KEYS: key for %q must be letters, digits, '-' or '_' (generate with: openssl rand -hex 32)", name)
 		case keys[name] != "":
 			return nil, fmt.Errorf("LLMUX_CLIENT_KEYS: client %q listed twice", name)
 		case seen[key]:
@@ -255,6 +259,17 @@ func clientKeysFromEnv() (map[string]string, error) {
 		return nil, errors.New("LLMUX_REQUIRE_CLIENT_KEYS is true but LLMUX_CLIENT_KEYS is empty")
 	}
 	return keys, nil
+}
+
+// validClientKey restricts keys to a URL- and list-safe alphabet: a key
+// containing "," or "=" would otherwise be silently split into another entry.
+func validClientKey(s string) bool {
+	for _, r := range s {
+		if (r < 'a' || r > 'z') && (r < 'A' || r > 'Z') && (r < '0' || r > '9') && r != '-' && r != '_' {
+			return false
+		}
+	}
+	return true
 }
 
 func validClientName(s string) bool {

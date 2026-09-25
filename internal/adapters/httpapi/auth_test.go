@@ -17,10 +17,14 @@ const (
 	reviewKey = "review-key-0123456789abcdef0123456789ab"
 )
 
+var failures []string
+
 func authServer(t *testing.T, keys map[string]string) (*httptest.Server, *testdoubles.Provider) {
 	t.Helper()
+	failures = nil
 	p := &testdoubles.Provider{Events: []domain.Event{{Kind: domain.EventStart}, {Kind: domain.EventText, Text: "hi"}, {Kind: domain.EventFinish, FinishReason: "stop"}}}
-	srv := httptest.NewServer(httpapi.New(app.New(p), httpapi.WithClientKeys(keys)))
+	srv := httptest.NewServer(httpapi.New(app.New(p), httpapi.WithClientKeys(keys),
+		httpapi.WithAuthFailureHook(func(r string) { failures = append(failures, r) })))
 	t.Cleanup(srv.Close)
 	return srv, p
 }
@@ -90,5 +94,41 @@ func TestAuth_HealthzOpen(t *testing.T) {
 	srv, _ := authServer(t, map[string]string{"openwebui": webKey})
 	if code := do(t, "GET", srv.URL+"/healthz", "", nil); code != 200 {
 		t.Errorf("status %d", code)
+	}
+}
+
+// A request is accepted if either header carries a valid key (the Anthropic
+// SDK can send both), and "Bearer" is case-insensitive.
+func TestAuth_HeaderForms(t *testing.T) {
+	srv, _ := authServer(t, map[string]string{"openwebui": webKey})
+	for name, h := range map[string]map[string]string{
+		"wrong x-api-key, valid bearer": {"x-api-key": "nope", "Authorization": "Bearer " + webKey},
+		"valid x-api-key, wrong bearer": {"x-api-key": webKey, "Authorization": "Bearer nope"},
+		"lowercase scheme":              {"Authorization": "bearer " + webKey},
+		"tab after scheme":              {"Authorization": "Bearer\t" + webKey},
+		"extra spaces":                  {"Authorization": "Bearer   " + webKey + "  "},
+	} {
+		if code := do(t, "POST", srv.URL+"/v1/chat/completions", chatBody, h); code != 200 {
+			t.Errorf("%s: status %d, want 200", name, code)
+		}
+	}
+}
+
+// Rejections are counted by reason and carry a WWW-Authenticate challenge.
+func TestAuth_FailuresReported(t *testing.T) {
+	srv, _ := authServer(t, map[string]string{"openwebui": webKey})
+	do(t, "POST", srv.URL+"/v1/chat/completions", chatBody, nil)
+	do(t, "GET", srv.URL+"/v1/models", "", map[string]string{"Authorization": "Bearer " + reviewKey})
+	if len(failures) != 2 || failures[0] != "missing" || failures[1] != "invalid" {
+		t.Errorf("failures: %v", failures)
+	}
+	req, _ := http.NewRequest("GET", srv.URL+"/v1/models", nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.Header.Get("WWW-Authenticate") == "" {
+		t.Error("401 must carry WWW-Authenticate")
 	}
 }

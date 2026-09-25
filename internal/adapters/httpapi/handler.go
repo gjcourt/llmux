@@ -21,8 +21,10 @@ const maxBody = 64 << 20
 
 // Handler serves the OpenAI-compatible routes.
 type Handler struct {
-	svc  inbound.ChatService
-	keys []clientKey
+	svc           inbound.ChatService
+	keys          []clientKey
+	onAuthFailure func(reason string)
+	authLog       authLog
 }
 
 // New returns the HTTP handler for svc.

@@ -19,9 +19,6 @@ import (
 	"github.com/gjcourt/llmux/internal/ports/outbound"
 )
 
-// anonymous is the client label when llmux runs without client keys.
-const anonymous = "anonymous"
-
 // Metrics implements outbound.Metrics on its own registry.
 type Metrics struct {
 	reg *prometheus.Registry
@@ -35,16 +32,21 @@ type Metrics struct {
 	citations *prometheus.CounterVec
 	finishes  *prometheus.CounterVec
 	noUsage   *prometheus.CounterVec
+	authFails *prometheus.CounterVec
+
+	clients []string // known client names; their series are pre-created
 }
 
 var _ outbound.Metrics = (*Metrics)(nil)
 
 // New returns Metrics with Go runtime and process collectors registered.
-func New() *Metrics {
+// clients are the names that can appear in the client label (the configured
+// client keys, or just "anonymous" when keys are off); see Declare.
+func New(clients []string) *Metrics {
 	reg := prometheus.NewRegistry()
 	reg.MustRegister(collectors.NewGoCollector(), collectors.NewProcessCollector(collectors.ProcessCollectorOpts{}))
 	f := func(c prometheus.Collector) { reg.MustRegister(c) }
-	m := &Metrics{reg: reg}
+	m := &Metrics{reg: reg, clients: clients}
 
 	m.requests = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "llmux_chat_requests_total",
@@ -86,12 +88,21 @@ func New() *Metrics {
 		Help: "Successful answers whose provider reported no token usage, so llmux_tokens_total undercounts them. (Failed requests often legitimately have none.)",
 	}, []string{"client", "provider", "model"})
 
-	for _, c := range []prometheus.Collector{m.requests, m.inFlight, m.duration, m.ttft, m.tokens, m.searches, m.citations, m.finishes, m.noUsage} {
+	m.authFails = prometheus.NewCounterVec(prometheus.CounterOpts{
+		Name: "llmux_auth_failures_total",
+		Help: "Requests rejected for a missing or invalid llmux client key. No client label: the caller is unknown.",
+	}, []string{"reason"})
+	for _, c := range []prometheus.Collector{m.requests, m.inFlight, m.duration, m.ttft, m.tokens, m.searches, m.citations, m.finishes, m.noUsage, m.authFails} {
 		f(c)
 	}
-	// Unrouted requests: the one fixed series (see Declare for why).
-	for _, stream := range []string{"true", "false"} {
-		m.requests.WithLabelValues(anonymous, "none", "unrouted", stream, string(outbound.OutcomeNoProvider))
+	// Series every deployment has, pre-created at zero (see Declare for why).
+	for _, r := range []string{"missing", "invalid"} {
+		m.authFails.WithLabelValues(r)
+	}
+	for _, c := range clients {
+		for _, stream := range []string{"true", "false"} {
+			m.requests.WithLabelValues(c, "none", "unrouted", stream, string(outbound.OutcomeNoProvider))
+		}
 	}
 	return m
 }
@@ -101,17 +112,12 @@ func New() *Metrics {
 // rate() can't count that first request — on a low-traffic deployment that
 // loses the first request of every new model/outcome pair. Call it for
 // providers whose models are known up front.
-func (m *Metrics) Declare(clients []string, provider string, models []string) {
-	for _, c := range clients {
-		for _, stream := range []string{"true", "false"} {
-			m.requests.WithLabelValues(c, "none", "unrouted", stream, string(outbound.OutcomeNoProvider))
-		}
-	}
+func (m *Metrics) Declare(provider string, models []string) {
 	outcomes := []outbound.Outcome{
 		outbound.OutcomeOK, outbound.OutcomeInvalidRequest, outbound.OutcomeUpstream4xx, outbound.OutcomeUpstream5xx,
 		outbound.OutcomeUnavailable, outbound.OutcomeCanceled, outbound.OutcomeError,
 	}
-	for _, c := range clients {
+	for _, c := range m.clients {
 		for _, mo := range models {
 			for _, stream := range []string{"true", "false"} {
 				for _, o := range outcomes {
@@ -175,6 +181,12 @@ func (m *Metrics) ChatFinished(o outbound.ChatObservation) {
 	} else if o.Outcome == outbound.OutcomeOK {
 		m.noUsage.WithLabelValues(c, p, mo).Inc()
 	}
+}
+
+// AuthFailed counts a request rejected for its client key; reason is
+// "missing" or "invalid". Wire it to httpapi.WithAuthFailureHook.
+func (m *Metrics) AuthFailed(reason string) {
+	m.authFails.WithLabelValues(reason).Inc()
 }
 
 // Handler serves the metrics in the Prometheus text format.
