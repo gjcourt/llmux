@@ -142,7 +142,7 @@ func (s *sseSink) Emit(e domain.Event) error {
 		fr := e.FinishReason
 		return s.write(s.chunk(sseDelta{}, &fr))
 	case domain.EventUsage:
-		if !s.includeUsage {
+		if !s.includeUsage || e.Partial {
 			return nil
 		}
 		u := wireUsage{PromptTokens: e.Usage.PromptTokens, CompletionTokens: e.Usage.CompletionTokens, TotalTokens: e.Usage.TotalTokens}
@@ -217,6 +217,9 @@ func (j *jsonSink) Emit(e domain.Event) error {
 	case domain.EventFinish:
 		j.finishReason = e.FinishReason
 	case domain.EventUsage:
+		if e.Partial {
+			return nil
+		}
 		j.usage = &wireUsage{PromptTokens: e.Usage.PromptTokens, CompletionTokens: e.Usage.CompletionTokens, TotalTokens: e.Usage.TotalTokens}
 	}
 	return nil

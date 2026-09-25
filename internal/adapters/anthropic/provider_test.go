@@ -550,3 +550,141 @@ func TestProvider_SlowClientIsNotIdle(t *testing.T) {
 		t.Fatalf("a slow client must not trip the upstream idle timeout: %v", err)
 	}
 }
+
+// Critique #32 pass 1: tokens consumed before a failure are billed, so they
+// must still be reported. Here the client cancels mid-answer, after
+// message_start told us the input.
+func TestProvider_CancelReportsInputConsumed(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Write([]byte(sse(`{"type":"message_start","message":{"id":"m","model":"m","usage":{"input_tokens":2800,"cache_read_input_tokens":200}}}`, evText, evDelta))) //nolint:errcheck
+		w.(http.Flusher).Flush()
+		<-r.Context().Done()
+	}))
+	defer srv.Close()
+	p := New(Config{BaseURL: srv.URL, Models: []string{"m"}})
+	rec := &cancelRecorder{cancel: cancel}
+	err := p.Chat(ctx, domain.ChatRequest{Model: "m", Messages: []domain.Message{user("x")}}, rec)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("got %v", err)
+	}
+	us := rec.kinds(domain.EventUsage)
+	if len(us) != 1 || us[0].Usage.PromptTokens != 3000 || us[0].Usage.CacheReadTokens != 200 || !us[0].Partial {
+		t.Errorf("usage after cancel must be reported, marked partial: %+v", us)
+	}
+	if len(rec.kinds(domain.EventFinish)) != 0 {
+		t.Error("a cancelled answer must not report a finish")
+	}
+}
+
+type cancelRecorder struct {
+	recorder
+	cancel context.CancelFunc
+}
+
+func (c *cancelRecorder) Emit(e domain.Event) error {
+	if e.Kind == domain.EventText {
+		c.cancel()
+	}
+	return c.recorder.Emit(e)
+}
+
+// A failure before message_start has consumed nothing and emits nothing —
+// in particular it must not commit the client's response early.
+func TestProvider_NoUsageBeforeStart(t *testing.T) {
+	p := newTestProvider(t, func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusTooManyRequests) })
+	rec := &recorder{}
+	_ = p.Chat(context.Background(), domain.ChatRequest{Model: "claude-sonnet-5", Messages: []domain.Message{user("x")}}, rec)
+	if len(rec.events) != 0 {
+		t.Errorf("events: %+v", rec.events)
+	}
+}
+
+// A failed resume still reports the completed turn's usage.
+func TestProvider_FailedResumeReportsCompletedTurn(t *testing.T) {
+	calls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls++
+		if calls == 1 {
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.Write([]byte(pausedTurn("m"))) //nolint:errcheck
+			return
+		}
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer srv.Close()
+	p := New(Config{BaseURL: srv.URL, Models: []string{"claude-sonnet-5"}, WebSearchMaxUses: 3})
+	rec := &recorder{}
+	_ = p.Chat(context.Background(), domain.ChatRequest{Model: "claude-sonnet-5", Messages: []domain.Message{user("q?")}}, rec)
+	us := rec.kinds(domain.EventUsage)
+	if len(us) != 1 || us[0].Usage.PromptTokens != 100 || us[0].Usage.CompletionTokens != 5 {
+		t.Errorf("usage: %+v", us)
+	}
+}
+
+// Cache and web-search counts sum across pause_turn resumes.
+func TestProvider_ResumeSumsUsageBreakdown(t *testing.T) {
+	turn := func(stop string) string {
+		return sse(`{"type":"message_start","message":{"id":"m","model":"claude-sonnet-5","usage":{"input_tokens":1}}}`,
+			`{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`,
+			`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"x"}}`,
+			`{"type":"message_delta","delta":{"stop_reason":"`+stop+`"},"usage":{"input_tokens":100,"cache_read_input_tokens":40,"cache_creation_input_tokens":10,"output_tokens":5,"server_tool_use":{"web_search_requests":2}}}`,
+			evStop)
+	}
+	s := &scripted{bodies: []string{turn("pause_turn"), turn("end_turn")}}
+	srv := httptest.NewServer(s.handler(t))
+	defer srv.Close()
+	p := New(Config{BaseURL: srv.URL, Models: []string{"claude-sonnet-5"}, WebSearchMaxUses: 3})
+	rec := &recorder{}
+	if err := p.Chat(context.Background(), domain.ChatRequest{Model: "claude-sonnet-5", Messages: []domain.Message{user("q?")}}, rec); err != nil {
+		t.Fatal(err)
+	}
+	want := domain.Usage{PromptTokens: 300, CompletionTokens: 10, TotalTokens: 310, CacheReadTokens: 80, CacheWriteTokens: 20, WebSearches: 4}
+	if us := rec.kinds(domain.EventUsage); len(us) != 1 || us[0].Usage != want {
+		t.Errorf("usage: %+v, want %+v", us, want)
+	}
+}
+
+// A malformed stream (usage before message_start) must not emit anything
+// that would commit the response before the error gets its status.
+func TestProvider_NoPartialUsageBeforeStart(t *testing.T) {
+	p := newTestProvider(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Write([]byte(sse(`{"type":"message_delta","delta":{},"usage":{"input_tokens":50,"output_tokens":1}}`, //nolint:errcheck
+			`{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}`)))
+	})
+	rec := &recorder{}
+	err := p.Chat(context.Background(), domain.ChatRequest{Model: "claude-sonnet-5", Messages: []domain.Message{user("x")}}, rec)
+	var ue *domain.UpstreamError
+	if !errors.As(err, &ue) || len(rec.events) != 0 {
+		t.Errorf("err %v, events %+v", err, rec.events)
+	}
+}
+
+type failOnFinish struct{ recorder }
+
+func (f *failOnFinish) Emit(e domain.Event) error {
+	_ = f.recorder.Emit(e)
+	if e.Kind == domain.EventFinish {
+		return errors.New("client gone")
+	}
+	return nil
+}
+
+// A client that leaves between the last token and the finish chunk still
+// leaves the answer's usage recorded.
+func TestProvider_UsageEvenIfFinishWriteFails(t *testing.T) {
+	fixture, _ := os.ReadFile("testdata/plain.sse")
+	p := newTestProvider(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Write(fixture) //nolint:errcheck
+	})
+	rec := &failOnFinish{}
+	if err := p.Chat(context.Background(), domain.ChatRequest{Model: "claude-sonnet-5", Messages: []domain.Message{user("x")}}, rec); err == nil {
+		t.Fatal("want the finish write error")
+	}
+	if us := rec.kinds(domain.EventUsage); len(us) != 1 || us[0].Usage.TotalTokens != 28 {
+		t.Errorf("usage: %+v", us)
+	}
+}

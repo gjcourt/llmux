@@ -103,7 +103,7 @@ func TestParseStream_DropsNonTextBlocks(t *testing.T) {
 func TestParseStream_UsageFromMessageDelta(t *testing.T) {
 	rec := parseFixture(t, "websearch.sse")
 	us := rec.kinds(domain.EventUsage)
-	if len(us) != 1 || us[0].Usage != (domain.Usage{PromptTokens: 29268, CompletionTokens: 396, TotalTokens: 29664}) {
+	if len(us) != 1 || us[0].Usage != (domain.Usage{PromptTokens: 29268, CompletionTokens: 396, TotalTokens: 29664, WebSearches: 2}) {
 		t.Errorf("usage: %+v", us)
 	}
 }
@@ -131,7 +131,7 @@ func TestParseStream_CacheTokensCountAsPrompt(t *testing.T) {
 		t.Fatal(err)
 	}
 	us := rec.kinds(domain.EventUsage)
-	if len(us) != 1 || us[0].Usage != (domain.Usage{PromptTokens: 10, CompletionTokens: 7, TotalTokens: 17}) {
+	if len(us) != 1 || us[0].Usage != (domain.Usage{PromptTokens: 10, CompletionTokens: 7, TotalTokens: 17, CacheReadTokens: 3, CacheWriteTokens: 2}) {
 		t.Errorf("usage without input in message_delta should keep start's: %+v", us)
 	}
 }
@@ -339,7 +339,7 @@ func TestParseStream_CacheTokensFromMessageDelta(t *testing.T) {
 	if err := parseStream(strings.NewReader(body), rec, 0); err != nil {
 		t.Fatal(err)
 	}
-	if us := rec.kinds(domain.EventUsage); len(us) != 1 || us[0].Usage != (domain.Usage{PromptTokens: 100, CompletionTokens: 7, TotalTokens: 107}) {
+	if us := rec.kinds(domain.EventUsage); len(us) != 1 || us[0].Usage != (domain.Usage{PromptTokens: 100, CompletionTokens: 7, TotalTokens: 107, CacheReadTokens: 30, CacheWriteTokens: 20}) {
 		t.Errorf("usage: %+v", us)
 	}
 }

@@ -28,6 +28,7 @@ internal/app/                   routes a request to the first provider that Hand
 internal/adapters/httpapi/      inbound: OpenAI-compatible /v1/chat/completions, /v1/models, /healthz
 internal/adapters/anthropic/    outbound: Anthropic Messages API — text, web search, citations
 internal/adapters/openaicompat/ outbound: vLLM + Ollama, failover, tool-call transform
+internal/adapters/prometheus/   outbound: telemetry (outbound.Metrics) + /metrics handler
 internal/testdoubles/           scripted fake ChatProvider
 ```
 
@@ -96,7 +97,7 @@ Tool-calling models in vLLM/Ollama frequently return malformed JSON tool calls �
 
 | Service | Endpoint | Purpose |
 |---|---|---|
-| Anthropic | `LLMUX_ANTHROPIC_URL` (default `https://api.anthropic.com`) | Enabled by `LLMUX_ANTHROPIC_API_KEY`. `LLMUX_WEB_SEARCH_MAX_USES` (default 3; 0 = off) caps searches per request — each searched answer costs ~11–30k input tokens. `LLMUX_ANTHROPIC_MODELS` (default `claude-sonnet-5,claude-opus-5,claude-haiku-4-5`) is both the routing list and what `/v1/models` shows. `LLMUX_ANTHROPIC_MAX_TOKENS` (default 8192) applies when a request sets none |
+| Anthropic | `LLMUX_ANTHROPIC_URL` (default `https://api.anthropic.com`) | Enabled by `LLMUX_ANTHROPIC_API_KEY`. `LLMUX_WEB_SEARCH_MAX_USES` (default 3; 0 = off) caps searches per request — a searched answer costs ~11–30k input tokens, and offering the tool at all adds ~2.2–2.8k to every request. `LLMUX_ANTHROPIC_MODELS` (default `claude-sonnet-5,claude-opus-5,claude-haiku-4-5`) is both the routing list and what `/v1/models` shows. `LLMUX_ANTHROPIC_MAX_TOKENS` (default 8192) applies when a request sets none |
 | vLLM | `LLMUX_VLLM_URL` (default empty = off) | Tool-capable local backend; was `http://10.42.2.10:8000` |
 | Ollama | `LLMUX_OLLAMA_URL` (default empty = off) | Local-model backend; was `http://10.42.2.10:30068/v1` |
 
@@ -116,6 +117,8 @@ Start here: [Architecture Overview](docs/architecture/2026-07-25-overview.md) �
 
 ## Observability
 
-Logs to stderr in slog text format at debug level. `GET /healthz` for readiness. No metrics endpoint.
+Logs to stderr in slog text format at debug level. `GET /healthz` for readiness.
+
+Prometheus metrics on a **separate listener**, `LLMUX_METRICS_ADDR` (default `:9090`; empty disables) — `GET /metrics` is not on the chat port. Telemetry is an outbound port (`outbound.Metrics`): `app.Service` meters every request through a pass-through sink, so providers only need to emit `domain.Usage`. Never label a metric with an unrouted, client-supplied value. Design: [docs/design/2026-09-25-telemetry.md](docs/design/2026-09-25-telemetry.md).
 
 When you learn a new convention or invariant in this repo, update this file.

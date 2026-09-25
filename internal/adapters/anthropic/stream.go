@@ -45,6 +45,9 @@ type apiUsage struct {
 	CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
 	CacheReadInputTokens     int `json:"cache_read_input_tokens"`
 	OutputTokens             int `json:"output_tokens"`
+	ServerToolUse            struct {
+		WebSearchRequests int `json:"web_search_requests"`
+	} `json:"server_tool_use"`
 }
 
 // StreamError is an `error` event received after the stream started, e.g.
@@ -94,8 +97,28 @@ type streamState struct {
 	created int64
 	started bool
 	cited   map[string]bool
-	usage   domain.Usage
+	usage   domain.Usage // completed turns
+
+	// The turn being read: its input is known from message_start, its
+	// output only from message_delta. Kept so a turn that fails part-way
+	// still reports the (billed) input it consumed.
+	turnIn, turnOut apiUsage
 }
+
+// add returns u plus one turn's usage.
+func add(u domain.Usage, in, out apiUsage) domain.Usage {
+	prompt := in.InputTokens + in.CacheCreationInputTokens + in.CacheReadInputTokens
+	u.PromptTokens += prompt
+	u.CompletionTokens += out.OutputTokens
+	u.TotalTokens += prompt + out.OutputTokens
+	u.CacheReadTokens += in.CacheReadInputTokens
+	u.CacheWriteTokens += in.CacheCreationInputTokens
+	u.WebSearches += out.ServerToolUse.WebSearchRequests
+	return u
+}
+
+// spent is everything consumed so far, the unfinished turn included.
+func (st *streamState) spent() domain.Usage { return add(st.usage, st.turnIn, st.turnOut) }
 
 func newStreamState(created int64) *streamState {
 	return &streamState{created: created, cited: map[string]bool{}}
@@ -125,10 +148,14 @@ func parseStream(r io.Reader, sink domain.EventSink, created int64) error {
 
 // finish emits the final Finish and Usage events.
 func (st *streamState) finish(sink domain.EventSink, stopReason string) error {
-	if err := sink.Emit(domain.Event{Kind: domain.EventFinish, FinishReason: finishReason(stopReason)}); err != nil {
-		return err
+	ferr := sink.Emit(domain.Event{Kind: domain.EventFinish, FinishReason: finishReason(stopReason)})
+	// Usage is emitted even when the client is already gone, so telemetry
+	// still counts the (complete, billed) answer.
+	uerr := sink.Emit(domain.Event{Kind: domain.EventUsage, Usage: st.usage})
+	if ferr != nil {
+		return ferr
 	}
-	return sink.Emit(domain.Event{Kind: domain.EventUsage, Usage: st.usage})
+	return uerr
 }
 
 // parseTurn reads one Messages API SSE stream, emitting events as it goes,
@@ -150,9 +177,9 @@ func (st *streamState) parseTurn(r io.Reader, sink domain.EventSink) (turn, erro
 		order   []int
 		partial = map[int]*strings.Builder{} // input_json_delta per block
 		lossy   bool
-		in, out apiUsage
 		stop    string
 	)
+	st.turnIn, st.turnOut = apiUsage{}, apiUsage{}
 
 	for sc.Scan() {
 		line := sc.Text()
@@ -169,7 +196,7 @@ func (st *streamState) parseTurn(r io.Reader, sink domain.EventSink) (turn, erro
 			if ev.Message == nil {
 				return turn{}, fmt.Errorf("message_start without message")
 			}
-			in = ev.Message.Usage
+			st.turnIn = ev.Message.Usage
 			if !st.started {
 				st.started = true
 				if err := sink.Emit(domain.Event{Kind: domain.EventStart, ID: ev.Message.ID, Model: ev.Message.Model, Created: st.created}); err != nil {
@@ -229,18 +256,16 @@ func (st *streamState) parseTurn(r io.Reader, sink domain.EventSink) (turn, erro
 				// here includes the search results (measured: 2,822 at
 				// start, 29,268 here). Older API versions sent only
 				// output_tokens, so keep start's input counts in that case.
-				out = *ev.Usage
+				st.turnOut = *ev.Usage
 				if u := *ev.Usage; u.InputTokens+u.CacheCreationInputTokens+u.CacheReadInputTokens > 0 {
-					in = u
+					st.turnIn = u
 				}
 			}
 
 		case "message_stop":
-			prompt := in.InputTokens + in.CacheCreationInputTokens + in.CacheReadInputTokens
-			st.usage.PromptTokens += prompt
-			st.usage.CompletionTokens += out.OutputTokens
-			st.usage.TotalTokens += prompt + out.OutputTokens
-			t := turn{stopReason: stop, outputTokens: out.OutputTokens, lossy: lossy}
+			st.usage = add(st.usage, st.turnIn, st.turnOut)
+			t := turn{stopReason: stop, outputTokens: st.turnOut.OutputTokens, lossy: lossy}
+			st.turnIn, st.turnOut = apiUsage{}, apiUsage{}
 			for _, i := range order {
 				raw, err := json.Marshal(blocks[i])
 				if err != nil {
