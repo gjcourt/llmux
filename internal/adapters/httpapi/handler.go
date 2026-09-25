@@ -115,11 +115,18 @@ func writeChatError(w http.ResponseWriter, err error) {
 	}
 }
 
-// clientStatus is the status a client sees for an upstream's. Auth failures
-// are llmux's own credentials, not the client's, so they become 502 rather
-// than telling the client to re-authenticate. Anthropic's non-standard 529
-// (overloaded) becomes 503, which clients know to retry.
+// clientStatus is the status a client sees for an upstream's. Redirects and
+// auth failures are llmux's own configuration, not the client's, so they
+// become 502 — an auth failure must not tell the client to re-authenticate.
+// Anthropic's non-standard 529 (overloaded) becomes 503, which clients know
+// to retry.
 func clientStatus(upstream int) int {
+	if upstream >= 300 && upstream < 400 {
+		// llmux never follows redirects (see anthropic.HTTPClient), and a
+		// bare 3xx without its Location means nothing to the client.
+		slog.Warn("upstream redirected; check the backend base URL", "status", upstream)
+		return http.StatusBadGateway
+	}
 	switch upstream {
 	case http.StatusUnauthorized, http.StatusForbidden:
 		return http.StatusBadGateway

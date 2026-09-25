@@ -138,7 +138,7 @@ const streamReq = `{"model":"claude-sonnet-5","stream":true,"messages":[{"role":
 // llmux's own bad key is not the client's problem: 401/403 become 502. 529
 // becomes a retryable 503. Retry-After survives.
 func TestE2E_AnthropicStatusMapping(t *testing.T) {
-	for upstream, want := range map[int]int{401: 502, 403: 502, 429: 429, 529: 503, 400: 400} {
+	for upstream, want := range map[int]int{401: 502, 403: 502, 429: 429, 529: 503, 400: 400, 301: 502, 307: 502} {
 		srv := fakeAnthropic(t, func(w http.ResponseWriter, _ *http.Request) {
 			w.Header().Set("Content-Type", "application/json")
 			w.Header().Set("Retry-After", "9")

@@ -150,9 +150,10 @@ func TestProvider_IdleTimeout(t *testing.T) {
 		w.Header().Set("Content-Type", "text/event-stream")
 		w.Write([]byte(sse(evStart))) //nolint:errcheck
 		w.(http.Flusher).Flush()
-		select {
+		select { // bounded, so a regression fails instead of deadlocking srv.Close
 		case <-release:
 		case <-r.Context().Done():
+		case <-time.After(3 * time.Second):
 		}
 	}))
 	defer srv.Close()
@@ -224,5 +225,60 @@ func TestProvider_RetryAfterKept(t *testing.T) {
 	var ue *domain.UpstreamError
 	if !errors.As(err, &ue) || ue.RetryAfter != "17" {
 		t.Fatalf("got %v", err)
+	}
+}
+
+// Critique #29 pass 2: the watchdog must also cover an error body — a proxy
+// can send a 5xx status and then stall.
+func TestProvider_IdleTimeoutCoversErrorBody(t *testing.T) {
+	release := make(chan struct{})
+	defer close(release)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte(`{"type":"error","err`)) //nolint:errcheck
+		w.(http.Flusher).Flush()
+		select { // bounded, so a regression fails instead of deadlocking srv.Close
+		case <-release:
+		case <-r.Context().Done():
+		case <-time.After(10 * time.Second):
+		}
+	}))
+	defer srv.Close()
+	p := New(Config{BaseURL: srv.URL, Models: []string{"m"}, IdleTimeout: 150 * time.Millisecond})
+	done := make(chan error, 1)
+	go func() {
+		done <- p.Chat(context.Background(), domain.ChatRequest{Model: "m", Messages: []domain.Message{user("x")}}, &recorder{})
+	}()
+	select {
+	case err := <-done:
+		var ue *domain.UpstreamError
+		if !errors.As(err, &ue) || ue.Status != 500 || string(ue.Body) != `{"type":"error","err` {
+			t.Fatalf("want the 500 with the partial body, got %v", err)
+		}
+	case <-time.After(2 * time.Second): // idle is 150ms; the handler stalls 10s
+		t.Fatal("a stalled error body hung the request")
+	}
+}
+
+type slowSink struct{ delay time.Duration }
+
+func (s slowSink) Emit(domain.Event) error { time.Sleep(s.delay); return nil }
+
+// Time spent writing to a slow client is not upstream silence.
+func TestProvider_SlowClientIsNotIdle(t *testing.T) {
+	// Events arrive promptly, one write each, so every one needs its own
+	// Read — and each Read comes after a slow Emit.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		for _, ev := range []string{evStart, evText, evDelta, evDelta, `{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":1}}`, evStop} {
+			w.Write([]byte(sse(ev))) //nolint:errcheck
+			w.(http.Flusher).Flush()
+			time.Sleep(20 * time.Millisecond)
+		}
+	}))
+	defer srv.Close()
+	p := New(Config{BaseURL: srv.URL, Models: []string{"m"}, IdleTimeout: 100 * time.Millisecond})
+	if err := p.Chat(context.Background(), domain.ChatRequest{Model: "m", Messages: []domain.Message{user("x")}}, slowSink{delay: 250 * time.Millisecond}); err != nil {
+		t.Fatalf("a slow client must not trip the upstream idle timeout: %v", err)
 	}
 }

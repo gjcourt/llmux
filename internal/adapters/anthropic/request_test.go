@@ -111,7 +111,7 @@ func TestBuildRequest_Rejects(t *testing.T) {
 // whitespace. Earlier assistant turns are left alone.
 func TestBuildRequest_TrimsTrailingPrefillWhitespace(t *testing.T) {
 	got, err := buildRequest(domain.ChatRequest{Model: "m", Messages: []domain.Message{
-		user("a"), {Role: "assistant", Content: "keep  "}, user("b"), {Role: "assistant", Content: "The colour is \n"},
+		user("a"), {Role: "assistant", Content: "keep  "}, user("b"), {Role: "assistant", Content: "The colour is \u00a0\n"},
 	}}, 10)
 	if err != nil {
 		t.Fatal(err)

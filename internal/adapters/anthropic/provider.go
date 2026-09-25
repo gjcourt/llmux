@@ -110,13 +110,16 @@ func (p *Provider) Chat(ctx context.Context, req domain.ChatRequest, sink domain
 		return fmt.Errorf("%w: %v", domain.ErrUnavailable, err)
 	}
 	defer resp.Body.Close()
-
-	if resp.StatusCode >= 300 {
-		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-		return &domain.UpstreamError{Status: resp.StatusCode, ContentType: resp.Header.Get("Content-Type"), Body: raw, RetryAfter: resp.Header.Get("Retry-After")}
-	}
+	// Everything after the headers is read through the watchdog, error
+	// bodies included: a proxy can send a 5xx status and then stall.
 	stream := newIdleReader(resp.Body, p.cfg.IdleTimeout, cancel)
 	defer stream.stop()
+
+	if resp.StatusCode >= 300 {
+		// On a stall this keeps the status and whatever body arrived.
+		raw, _ := io.ReadAll(io.LimitReader(stream, 1<<20))
+		return &domain.UpstreamError{Status: resp.StatusCode, ContentType: resp.Header.Get("Content-Type"), Body: raw, RetryAfter: resp.Header.Get("Retry-After")}
+	}
 	err = parseStream(stream, sink, p.cfg.Now().Unix())
 	if err != nil && errors.Is(context.Cause(ctx), errIdle) {
 		return fmt.Errorf("anthropic stream: %w", errIdle)
@@ -128,10 +131,12 @@ func (p *Provider) Chat(ctx context.Context, req domain.ChatRequest, sink domain
 // from context.Canceled, which the handler reads as "the client went away".
 var errIdle = errors.New("no data from upstream within the idle timeout")
 
-// idleReader cancels the request when no bytes arrive for d. Anthropic sends
-// ping events while it works (including during web searches), so silence
-// means a stalled connection, which would otherwise hold the client's
-// request open indefinitely — there is deliberately no overall timeout.
+// idleReader cancels the request when a single Read waits longer than d.
+// Anthropic sends ping events while it works (including during web
+// searches), so a read that long means a stalled connection, which would
+// otherwise hold the client's request open indefinitely — there is
+// deliberately no overall timeout. The clock runs only inside Read: time
+// spent writing to a slow client is not blamed on the upstream.
 type idleReader struct {
 	r     io.Reader
 	d     time.Duration
@@ -139,14 +144,15 @@ type idleReader struct {
 }
 
 func newIdleReader(r io.Reader, d time.Duration, cancel context.CancelCauseFunc) *idleReader {
-	return &idleReader{r: r, d: d, timer: time.AfterFunc(d, func() { cancel(errIdle) })}
+	t := time.AfterFunc(d, func() { cancel(errIdle) })
+	t.Stop()
+	return &idleReader{r: r, d: d, timer: t}
 }
 
 func (ir *idleReader) Read(p []byte) (int, error) {
+	ir.timer.Reset(ir.d)
 	n, err := ir.r.Read(p)
-	if n > 0 {
-		ir.timer.Reset(ir.d)
-	}
+	ir.timer.Stop()
 	return n, err
 }
 

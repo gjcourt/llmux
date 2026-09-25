@@ -4,6 +4,7 @@ import (
 	"log/slog"
 	"strconv"
 	"strings"
+	"unicode"
 
 	"github.com/gjcourt/llmux/internal/domain"
 )
@@ -85,7 +86,7 @@ func buildRequest(req domain.ChatRequest, defaultMaxTokens int) (messagesRequest
 	// prefill outright, and that 400 is relayed as-is — its message says
 	// exactly what's wrong.
 	if last := &out.Messages[len(out.Messages)-1]; last.Role == "assistant" {
-		last.Content = strings.TrimRight(last.Content, " \t\r\n")
+		last.Content = strings.TrimRightFunc(last.Content, unicode.IsSpace)
 	}
 	out.System = strings.Join(system, "\n\n")
 
