@@ -122,8 +122,9 @@ func writeChatError(w http.ResponseWriter, err error) {
 // to retry.
 func clientStatus(upstream int) int {
 	if upstream >= 300 && upstream < 400 {
-		// llmux never follows redirects (see anthropic.HTTPClient), and a
-		// bare 3xx without its Location means nothing to the client.
+		// A 3xx reaches here only when a provider didn't follow it (the
+		// Anthropic client never does; see anthropic.HTTPClient). A bare 3xx
+		// without its Location means nothing to the client.
 		slog.Warn("upstream redirected; check the backend base URL", "status", upstream)
 		return http.StatusBadGateway
 	}

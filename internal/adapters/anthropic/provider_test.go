@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -251,9 +252,12 @@ func TestProvider_IdleTimeoutCoversErrorBody(t *testing.T) {
 	}()
 	select {
 	case err := <-done:
+		if !errors.Is(err, errIdle) || !strings.Contains(err.Error(), "HTTP 500") {
+			t.Fatalf("want the stall reported with the upstream status, got %v", err)
+		}
 		var ue *domain.UpstreamError
-		if !errors.As(err, &ue) || ue.Status != 500 || string(ue.Body) != `{"type":"error","err` {
-			t.Fatalf("want the 500 with the partial body, got %v", err)
+		if errors.As(err, &ue) {
+			t.Error("a truncated body must not be relayed as the upstream's own error")
 		}
 	case <-time.After(2 * time.Second): // idle is 150ms; the handler stalls 10s
 		t.Fatal("a stalled error body hung the request")

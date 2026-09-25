@@ -116,8 +116,12 @@ func (p *Provider) Chat(ctx context.Context, req domain.ChatRequest, sink domain
 	defer stream.stop()
 
 	if resp.StatusCode >= 300 {
-		// On a stall this keeps the status and whatever body arrived.
 		raw, _ := io.ReadAll(io.LimitReader(stream, 1<<20))
+		if errors.Is(context.Cause(ctx), errIdle) {
+			// The body stalled part-way; relaying a truncated JSON error
+			// would only fail to parse. Report the stall instead (502).
+			return fmt.Errorf("anthropic returned HTTP %d, then its error body stalled: %w", resp.StatusCode, errIdle)
+		}
 		return &domain.UpstreamError{Status: resp.StatusCode, ContentType: resp.Header.Get("Content-Type"), Body: raw, RetryAfter: resp.Header.Get("Retry-After")}
 	}
 	err = parseStream(stream, sink, p.cfg.Now().Unix())
