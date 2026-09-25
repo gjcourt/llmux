@@ -10,9 +10,12 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
+	"github.com/gjcourt/llmux/internal/adapters/anthropic"
 	"github.com/gjcourt/llmux/internal/adapters/httpapi"
 	"github.com/gjcourt/llmux/internal/adapters/openaicompat"
 	"github.com/gjcourt/llmux/internal/app"
@@ -42,15 +45,10 @@ func run() error {
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug})))
 
 	addr := envOr("LLMUX_ADDR", ":8080")
-	compat := openaicompat.New(openaicompat.Config{
-		VLLMURL:   envOr("LLMUX_VLLM_URL", "http://10.42.2.10:8000"),
-		OllamaURL: envOr("LLMUX_OLLAMA_URL", "http://10.42.2.10:30068/v1"),
-		Client:    &http.Client{Timeout: 120 * time.Second},
-	})
 
-	var providers []outbound.ChatProvider
-	if compat.Enabled() {
-		providers = append(providers, compat)
+	providers, err := providersFromEnv()
+	if err != nil {
+		return err
 	}
 	if len(providers) == 0 {
 		slog.Warn("no model backends configured; every chat request will return 404")
@@ -70,6 +68,49 @@ func run() error {
 	}
 	slog.Info("llmux listening", "addr", ln.Addr().String(), "providers", len(providers))
 	return serve(ctx, srv, ln, 25*time.Second)
+}
+
+// providersFromEnv builds the providers from the environment, in routing
+// order.
+func providersFromEnv() ([]outbound.ChatProvider, error) {
+	// Order matters: the first provider that Handles a model wins, so the
+	// specific Anthropic list goes before the vLLM/Ollama catch-all.
+	var providers []outbound.ChatProvider
+
+	if key := os.Getenv("LLMUX_ANTHROPIC_API_KEY"); key != "" {
+		maxTokens, err := strconv.Atoi(envOr("LLMUX_ANTHROPIC_MAX_TOKENS", "8192"))
+		if err != nil || maxTokens <= 0 {
+			return nil, errors.New("LLMUX_ANTHROPIC_MAX_TOKENS must be a positive integer")
+		}
+		models := splitList(envOr("LLMUX_ANTHROPIC_MODELS", "claude-sonnet-5,claude-opus-5,claude-haiku-4-5"))
+		providers = append(providers, anthropic.New(anthropic.Config{
+			APIKey:           key,
+			BaseURL:          envOr("LLMUX_ANTHROPIC_URL", "https://api.anthropic.com"),
+			Models:           models,
+			DefaultMaxTokens: maxTokens,
+			// No overall timeout: answers stream for as long as they take, and
+			// the client's context cancels the upstream call. Headers must
+			// still arrive promptly.
+			Client: &http.Client{Transport: &http.Transport{
+				Proxy:                 http.ProxyFromEnvironment,
+				ResponseHeaderTimeout: 60 * time.Second,
+				TLSHandshakeTimeout:   10 * time.Second,
+				IdleConnTimeout:       90 * time.Second,
+			}},
+		}))
+		slog.Info("anthropic provider enabled", "models", models)
+	}
+
+	// Both backends left with the homelab GPUs, so they now default to off.
+	compat := openaicompat.New(openaicompat.Config{
+		VLLMURL:   envOr("LLMUX_VLLM_URL", ""),
+		OllamaURL: envOr("LLMUX_OLLAMA_URL", ""),
+		Client:    &http.Client{Timeout: 120 * time.Second},
+	})
+	if compat.Enabled() {
+		providers = append(providers, compat)
+	}
+	return providers, nil
 }
 
 // serve runs srv on ln until ctx is done, then drains in-flight requests for
@@ -94,4 +135,15 @@ func serve(ctx context.Context, srv *http.Server, ln net.Listener, grace time.Du
 	}
 	<-drained
 	return nil
+}
+
+// splitList parses a comma-separated list, dropping blanks.
+func splitList(s string) []string {
+	var out []string
+	for part := range strings.SplitSeq(s, ",") {
+		if p := strings.TrimSpace(part); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
 }

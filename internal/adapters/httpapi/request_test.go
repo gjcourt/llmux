@@ -46,6 +46,9 @@ func TestParseRequest_Fields(t *testing.T) {
 	if got := req.Messages[1].Content; got != "hello world" {
 		t.Errorf("text parts should concatenate, skipping images: %q", got)
 	}
+	if !req.Messages[1].NonText || req.Messages[0].NonText || req.Messages[3].NonText {
+		t.Error("NonText must be set exactly on the message with an image part")
+	}
 	if tc := req.Messages[2].ToolCalls; len(tc) != 1 || tc[0].Name != "f" {
 		t.Errorf("tool calls: %+v", tc)
 	}

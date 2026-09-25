@@ -1,0 +1,5 @@
+The newest Open WebUI release is **v0.11.4**, published on **September 21, 2026**.
+
+This is confirmed by the official GitHub releases page, which lists v0.11.4 as the latest release, dated 21 Sep 19:25. A key highlight of this release is a much smaller "slim" Docker image — a slim build now comes down at around 175 MB, nearly 89% smaller than the previous release.
+
+**Source:** [GitHub – open-webui/open-webui Releases](https://github.com/open-webui/open-webui/releases)

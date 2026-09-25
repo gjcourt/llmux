@@ -33,8 +33,13 @@ type ChatRequest struct {
 // Message is one conversation turn. Content is the concatenation of the
 // message's text parts.
 type Message struct {
-	Role       string
-	Content    string
+	Role    string
+	Content string // the text parts, concatenated
+	// NonText is set when the content also had parts that are not text
+	// (images, audio, files). Content alone then under-represents the
+	// message, so a provider that cannot forward those parts must refuse it
+	// rather than send the text as if it were everything.
+	NonText    bool
 	ToolCallID string
 	ToolCalls  []ToolCall
 }
@@ -118,6 +123,15 @@ var ErrNoProvider = errors.New("no provider serves this model")
 
 // ErrUnavailable means every upstream a provider could use was unreachable.
 var ErrUnavailable = errors.New("upstream unavailable")
+
+// InvalidRequestError is a request llmux can parse but a provider cannot
+// serve as asked — for example tools sent to a provider that doesn't support
+// them. It maps to HTTP 400.
+type InvalidRequestError struct {
+	Msg string
+}
+
+func (e *InvalidRequestError) Error() string { return e.Msg }
 
 // UpstreamError is a non-success response from an upstream, returned before any
 // event was emitted so the inbound adapter can relay its status and body.

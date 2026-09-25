@@ -87,7 +87,10 @@ func (h *Handler) chat(w http.ResponseWriter, r *http.Request) {
 // error response is relayed with its original status and body.
 func writeChatError(w http.ResponseWriter, err error) {
 	var ue *domain.UpstreamError
+	var ie *domain.InvalidRequestError
 	switch {
+	case errors.As(err, &ie):
+		writeError(w, http.StatusBadRequest, ie.Msg)
 	case errors.As(err, &ue):
 		ct := ue.ContentType
 		if ct == "" {

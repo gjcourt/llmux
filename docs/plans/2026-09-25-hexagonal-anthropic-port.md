@@ -98,9 +98,22 @@ conversation plus the partial assistant content and keeps streaming into the sam
 client response, bounded by a retry cap.
 
 Request direction (OpenAI → Anthropic): `system` messages hoisted into `system`;
-consecutive same-role messages merged; `max_tokens` defaulted (Anthropic requires it);
-`temperature` clamped to ≤1; `stream_options` handled locally; unknown fields dropped
-and logged at debug.
+`max_tokens` defaulted (Anthropic requires it); `stream_options` handled locally;
+unknown fields dropped.
+
+> **Revised 2026-09-25 after probing the live API (phase 2):**
+> - `temperature` and `top_p` are **always dropped**, not clamped. The whole
+>   Claude 5 family (`claude-sonnet-5`, `claude-opus-5`, `claude-fable-5-1`)
+>   rejects either one with HTTP 400 "deprecated for this model"; only
+>   `claude-haiku-4-5` accepts them.
+> - Consecutive same-role messages are **not merged**: the API accepts them,
+>   as it does a conversation that starts with an assistant turn.
+> - Whitespace-only stop sequences are filtered (they 400); an empty user
+>   message is rejected with a 400 (it would 400 upstream anyway).
+> - Images and other non-text parts are rejected with a 400 rather than
+>   dropped, for the same reason tools are.
+> - `message_delta`'s usage is cumulative and supersedes `message_start`'s:
+>   after two searches, input was 2,822 at start and 29,268 at the end.
 
 ## Target layout
 
