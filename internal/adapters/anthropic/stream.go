@@ -45,6 +45,9 @@ type apiUsage struct {
 	CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
 	CacheReadInputTokens     int `json:"cache_read_input_tokens"`
 	OutputTokens             int `json:"output_tokens"`
+	ServerToolUse            struct {
+		WebSearchRequests int `json:"web_search_requests"`
+	} `json:"server_tool_use"`
 }
 
 // StreamError is an `error` event received after the stream started, e.g.
@@ -240,6 +243,9 @@ func (st *streamState) parseTurn(r io.Reader, sink domain.EventSink) (turn, erro
 			st.usage.PromptTokens += prompt
 			st.usage.CompletionTokens += out.OutputTokens
 			st.usage.TotalTokens += prompt + out.OutputTokens
+			st.usage.CacheReadTokens += in.CacheReadInputTokens
+			st.usage.CacheWriteTokens += in.CacheCreationInputTokens
+			st.usage.WebSearches += out.ServerToolUse.WebSearchRequests
 			t := turn{stopReason: stop, outputTokens: out.OutputTokens, lossy: lossy}
 			for _, i := range order {
 				raw, err := json.Marshal(blocks[i])

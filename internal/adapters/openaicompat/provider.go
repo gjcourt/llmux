@@ -347,14 +347,20 @@ func parseUsage(raw json.RawMessage) (domain.Usage, bool) {
 		return domain.Usage{}, false
 	}
 	var u struct {
-		PromptTokens     int `json:"prompt_tokens"`
-		CompletionTokens int `json:"completion_tokens"`
-		TotalTokens      int `json:"total_tokens"`
+		PromptTokens        int `json:"prompt_tokens"`
+		CompletionTokens    int `json:"completion_tokens"`
+		TotalTokens         int `json:"total_tokens"`
+		PromptTokensDetails struct {
+			CachedTokens int `json:"cached_tokens"`
+		} `json:"prompt_tokens_details"`
 	}
 	if err := json.Unmarshal(raw, &u); err != nil {
 		return domain.Usage{}, false
 	}
-	return domain.Usage{PromptTokens: u.PromptTokens, CompletionTokens: u.CompletionTokens, TotalTokens: u.TotalTokens}, true
+	return domain.Usage{
+		PromptTokens: u.PromptTokens, CompletionTokens: u.CompletionTokens, TotalTokens: u.TotalTokens,
+		CacheReadTokens: u.PromptTokensDetails.CachedTokens,
+	}, true
 }
 
 // Models implements outbound.ChatProvider by merging both upstreams' lists.

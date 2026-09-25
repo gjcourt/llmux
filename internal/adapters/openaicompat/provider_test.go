@@ -403,3 +403,10 @@ func TestRelaySSE_CancelPropagates(t *testing.T) {
 		t.Fatalf("want context.Canceled, got %v", err)
 	}
 }
+
+func TestParseUsage_CachedTokens(t *testing.T) {
+	u, ok := parseUsage(json.RawMessage(`{"prompt_tokens":100,"completion_tokens":5,"total_tokens":105,"prompt_tokens_details":{"cached_tokens":40}}`))
+	if !ok || u != (domain.Usage{PromptTokens: 100, CompletionTokens: 5, TotalTokens: 105, CacheReadTokens: 40}) {
+		t.Errorf("got %+v %v", u, ok)
+	}
+}

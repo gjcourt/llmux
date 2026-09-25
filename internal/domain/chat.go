@@ -111,9 +111,17 @@ type ToolCallDelta struct {
 
 // Usage is token accounting for one response.
 type Usage struct {
-	PromptTokens     int
+	PromptTokens     int // all input, cache reads and writes included (OpenAI's meaning)
 	CompletionTokens int
 	TotalTokens      int
+
+	// Breakdown, where the provider reports it. Both are included in
+	// PromptTokens; they're split out because they're billed differently.
+	CacheReadTokens  int
+	CacheWriteTokens int
+
+	// WebSearches is how many server-side web searches the provider ran.
+	WebSearches int
 }
 
 // EventSink receives a provider's events in order. Emit returns an error when
