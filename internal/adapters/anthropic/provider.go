@@ -165,7 +165,7 @@ func (p *Provider) send(ctx context.Context, body messagesRequest, st *streamSta
 			// A failed resume. Whether the client can still get this
 			// status is the inbound adapter's call: a JSON client has
 			// received nothing yet, a streaming one has.
-			return turn{}, fmt.Errorf("resuming paused turn: HTTP %d: %s: %w", ue.Status, ue.Body, ue)
+			return turn{}, fmt.Errorf("resuming paused turn: %s: %w", truncate(ue.Body, 512), ue)
 		}
 		return turn{}, ue
 	}
@@ -224,4 +224,13 @@ func HTTPClient() *http.Client {
 		},
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 	}
+}
+
+// truncate shortens b for an error message; an upstream body can be a
+// megabyte of proxy HTML.
+func truncate(b []byte, n int) string {
+	if len(b) <= n {
+		return string(b)
+	}
+	return string(b[:n]) + "…"
 }

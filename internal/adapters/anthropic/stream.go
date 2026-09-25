@@ -198,6 +198,7 @@ func (st *streamState) parseTurn(r io.Reader, sink domain.EventSink) (turn, erro
 		case "content_block_delta":
 			b := blocks[ev.Index]
 			if b == nil || ev.Delta == nil {
+				lossy = true // content we can't place; never resume this turn
 				continue
 			}
 			known, err := st.applyDelta(b, ev, partial, sink)
@@ -254,12 +255,15 @@ func (st *streamState) parseTurn(r io.Reader, sink domain.EventSink) (turn, erro
 			if ev.Error != nil {
 				se.Type, se.Message = ev.Error.Type, ev.Error.Message
 			}
+			ue := &domain.UpstreamError{Status: errorStatus(se.Type), ContentType: "application/json", Body: []byte(strings.TrimSpace(line[len("data:"):]))}
 			if !st.started {
 				// Nothing has reached the client, so it can still get a real
 				// status — one that says whether retrying makes sense.
-				return turn{}, &domain.UpstreamError{Status: errorStatus(se.Type), ContentType: "application/json", Body: []byte(strings.TrimSpace(line[len("data:"):]))}
+				return turn{}, ue
 			}
-			return turn{}, se
+			// Mid-answer: a streaming client is already answered, but a JSON
+			// client has received nothing, so keep the status available.
+			return turn{}, fmt.Errorf("%w: %w", se, ue)
 
 		case "ping":
 			// keep-alive

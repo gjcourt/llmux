@@ -302,3 +302,25 @@ func TestE2E_AnthropicFailedResume(t *testing.T) {
 		t.Errorf("stream: %d %s", resp.StatusCode, body)
 	}
 }
+
+// An overloaded error event after message_start: a JSON client has received
+// nothing, so it still gets the retryable 503; a streaming client gets an
+// error chunk.
+func TestE2E_AnthropicErrorEventAfterStart(t *testing.T) {
+	newSrv := func() *httptest.Server {
+		return fakeAnthropic(t, func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.Write([]byte("data: {\"type\":\"message_start\",\"message\":{\"id\":\"m\",\"model\":\"claude-sonnet-5\",\"usage\":{\"input_tokens\":1}}}\n\n" + //nolint:errcheck
+				"data: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"Overloaded\"}}\n\n"))
+		})
+	}
+	resp, body := post(t, newSrv(), `{"model":"claude-sonnet-5","messages":[{"role":"user","content":"x"}]}`)
+	if resp.StatusCode != 503 || !strings.Contains(body, "Overloaded") {
+		t.Errorf("json: %d %s", resp.StatusCode, body)
+	}
+	resp, body = post(t, newSrv(), streamReq)
+	chunks, done := sseEvents(t, body)
+	if resp.StatusCode != 200 || !done || chunks[len(chunks)-1].Error == nil {
+		t.Errorf("stream: %d %s", resp.StatusCode, body)
+	}
+}
