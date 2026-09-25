@@ -688,3 +688,42 @@ func TestProvider_UsageEvenIfFinishWriteFails(t *testing.T) {
 		t.Errorf("usage: %+v", us)
 	}
 }
+
+// With WebSearchStreamOnly, a non-streamed request (Open WebUI's titles,
+// tags, follow-ups) is not offered the search tool, so it doesn't pay the
+// tool's per-request tokens; a streamed one is.
+func TestProvider_WebSearchStreamOnly(t *testing.T) {
+	var bodies [][]byte
+	fixture, _ := os.ReadFile("testdata/plain.sse")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		bodies = append(bodies, b)
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Write(fixture) //nolint:errcheck
+	}))
+	defer srv.Close()
+	tools := func(b []byte) int {
+		var body struct {
+			Tools []json.RawMessage `json:"tools"`
+		}
+		json.Unmarshal(b, &body) //nolint:errcheck
+		return len(body.Tools)
+	}
+	for _, streamOnly := range []bool{true, false} {
+		bodies = nil
+		p := New(Config{BaseURL: srv.URL, Models: []string{"m"}, WebSearchMaxUses: 3, WebSearchStreamOnly: streamOnly})
+		for _, stream := range []bool{true, false} {
+			if err := p.Chat(context.Background(), domain.ChatRequest{Model: "m", Stream: stream, Messages: []domain.Message{user("x")}}, &recorder{}); err != nil {
+				t.Fatal(err)
+			}
+		}
+		streamed, background := tools(bodies[0]), tools(bodies[1])
+		wantBackground := 1
+		if streamOnly {
+			wantBackground = 0
+		}
+		if streamed != 1 || background != wantBackground {
+			t.Errorf("streamOnly=%v: streamed request got %d tools, non-streamed %d (want 1, %d)", streamOnly, streamed, background, wantBackground)
+		}
+	}
+}

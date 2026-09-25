@@ -33,13 +33,19 @@ const maxContinuations = 3
 // Config configures the provider.
 type Config struct {
 	APIKey           string
-	BaseURL          string           // default https://api.anthropic.com
-	Models           []string         // model ids this provider serves and lists
-	DefaultMaxTokens int              // used when the request sets none; Anthropic requires one
-	WebSearchMaxUses int              // searches allowed per request; 0 disables web search
-	Client           *http.Client     // default HTTPClient()
-	IdleTimeout      time.Duration    // cancel after this long with no bytes; default 90s
-	Now              func() time.Time // for tests
+	BaseURL          string   // default https://api.anthropic.com
+	Models           []string // model ids this provider serves and lists
+	DefaultMaxTokens int      // used when the request sets none; Anthropic requires one
+	WebSearchMaxUses int      // searches allowed per request; 0 disables web search
+	// WebSearchStreamOnly offers web search only to streamed requests.
+	// Merely offering the tool adds ~2.2-2.8k input tokens to a request, and
+	// Open WebUI's background calls (titles, tags, follow-ups, …) are all
+	// non-streamed (v0.11.3: 'stream': False in routers/tasks.py) and never
+	// need it; its chat replies stream.
+	WebSearchStreamOnly bool
+	Client              *http.Client     // default HTTPClient()
+	IdleTimeout         time.Duration    // cancel after this long with no bytes; default 90s
+	Now                 func() time.Time // for tests
 }
 
 // Provider implements outbound.ChatProvider for Anthropic.
@@ -91,7 +97,11 @@ func (p *Provider) Models(context.Context) ([]domain.Model, error) {
 // with a follow-up request, up to maxContinuations times, and streams on into
 // the same response.
 func (p *Provider) Chat(ctx context.Context, req domain.ChatRequest, sink domain.EventSink) error {
-	body, err := buildRequest(req, p.cfg.DefaultMaxTokens, p.cfg.WebSearchMaxUses)
+	searches := p.cfg.WebSearchMaxUses
+	if p.cfg.WebSearchStreamOnly && !req.Stream {
+		searches = 0
+	}
+	body, err := buildRequest(req, p.cfg.DefaultMaxTokens, searches)
 	if err != nil {
 		return err
 	}

@@ -139,6 +139,10 @@ func providersFromEnv() ([]outbound.ChatProvider, error) {
 		if err != nil || searches < 0 {
 			return nil, errors.New("LLMUX_WEB_SEARCH_MAX_USES must be a non-negative integer (0 disables web search)")
 		}
+		streamOnly, err := strconv.ParseBool(envOr("LLMUX_WEB_SEARCH_STREAM_ONLY", "true"))
+		if err != nil {
+			return nil, errors.New("LLMUX_WEB_SEARCH_STREAM_ONLY must be true or false")
+		}
 		models := splitList(envOr("LLMUX_ANTHROPIC_MODELS", "claude-sonnet-5,claude-opus-5,claude-haiku-4-5"))
 		providers = append(providers, anthropic.New(anthropic.Config{
 			APIKey:           key,
@@ -146,9 +150,12 @@ func providersFromEnv() ([]outbound.ChatProvider, error) {
 			Models:           models,
 			DefaultMaxTokens: maxTokens,
 			WebSearchMaxUses: searches,
-			Client:           anthropic.HTTPClient(),
+			// Background calls (titles, tags) are non-streamed; don't pay
+			// the search tool's per-request tokens on them.
+			WebSearchStreamOnly: streamOnly,
+			Client:              anthropic.HTTPClient(),
 		}))
-		slog.Info("anthropic provider enabled", "models", models, "web_search_max_uses", searches)
+		slog.Info("anthropic provider enabled", "models", models, "web_search_max_uses", searches, "web_search_stream_only", streamOnly)
 	}
 
 	// Both backends left with the homelab GPUs, so they now default to off.

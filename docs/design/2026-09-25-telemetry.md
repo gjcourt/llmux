@@ -95,3 +95,8 @@ Measured 2026-09-25 with this telemetry: **offering the web search tool adds
 or not — "Say hello in five words" cost 13–14 input tokens with
 `LLMUX_WEB_SEARCH_MAX_USES=0` and 2,219 / 2,808 with 3. Open WebUI's
 background calls (titles, tags, follow-ups) pay it too.
+
+**Acted on (2026-09-25):** `LLMUX_WEB_SEARCH_STREAM_ONLY` (default `true`)
+offers web search to streamed requests only, so Open WebUI's non-streamed
+background calls stop paying for it. The dashboard's "Input tokens per
+request" panel shows the effect.
