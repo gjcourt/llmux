@@ -68,6 +68,9 @@ func (h *Handler) authenticate(next http.HandlerFunc) http.HandlerFunc {
 		if t, ok := bearerToken(r.Header.Get("Authorization")); ok {
 			tokens = append(tokens, t)
 		}
+		// If both headers carry valid keys for different clients, the
+		// Bearer one (checked last) names the caller; no privilege differs,
+		// the caller holds both keys.
 		name := ""
 		for _, t := range tokens {
 			sum := sha256.Sum256([]byte(t))
@@ -78,8 +81,11 @@ func (h *Handler) authenticate(next http.HandlerFunc) http.HandlerFunc {
 			}
 		}
 		if name == "" {
+			// "missing" only when no credentials were offered at all; an
+			// unparseable Authorization header (Basic, a bare "Bearer") is
+			// someone trying something, so it counts as invalid.
 			reason := "invalid"
-			if len(tokens) == 0 {
+			if len(tokens) == 0 && strings.TrimSpace(r.Header.Get("Authorization")) == "" {
 				reason = "missing"
 			}
 			h.authFailed(r, reason)
@@ -95,14 +101,12 @@ func (h *Handler) authenticate(next http.HandlerFunc) http.HandlerFunc {
 // The scheme is case-insensitive (RFC 7235) and may be followed by spaces or
 // a tab.
 func bearerToken(header string) (string, bool) {
-	scheme, rest, ok := strings.Cut(strings.TrimSpace(header), " ")
-	if !ok {
-		scheme, rest, ok = strings.Cut(strings.TrimSpace(header), "\t")
-	}
-	if !ok || !strings.EqualFold(scheme, "Bearer") {
+	h := strings.TrimSpace(header)
+	i := strings.IndexAny(h, " \t")
+	if i < 0 || !strings.EqualFold(h[:i], "Bearer") {
 		return "", false
 	}
-	t := strings.TrimSpace(rest)
+	t := strings.TrimSpace(h[i+1:])
 	return t, t != ""
 }
 
@@ -119,8 +123,11 @@ func (h *Handler) authFailed(r *http.Request, reason string) {
 	if time.Since(h.authLog.last) < authLogInterval {
 		return
 	}
+	// reason is this request's; the count covers every rejection since the
+	// last line, of either reason (the metric splits them). peer is the TCP
+	// peer — behind a gateway, the gateway.
 	slog.Warn("rejected request: missing or invalid llmux client key",
-		"reason", reason, "remote", r.RemoteAddr, "path", r.URL.Path, "rejections_since_last_log", h.authLog.suppressed)
+		"reason", reason, "peer", r.RemoteAddr, "path", r.URL.Path, "rejections_since_last_log", h.authLog.suppressed)
 	h.authLog.last, h.authLog.suppressed = time.Now(), 0
 }
 

@@ -106,6 +106,7 @@ func TestAuth_HeaderForms(t *testing.T) {
 		"valid x-api-key, wrong bearer": {"x-api-key": webKey, "Authorization": "Bearer nope"},
 		"lowercase scheme":              {"Authorization": "bearer " + webKey},
 		"tab after scheme":              {"Authorization": "Bearer\t" + webKey},
+		"tab then space":                {"Authorization": "Bearer\t " + webKey},
 		"extra spaces":                  {"Authorization": "Bearer   " + webKey + "  "},
 	} {
 		if code := do(t, "POST", srv.URL+"/v1/chat/completions", chatBody, h); code != 200 {
@@ -119,7 +120,8 @@ func TestAuth_FailuresReported(t *testing.T) {
 	srv, _ := authServer(t, map[string]string{"openwebui": webKey})
 	do(t, "POST", srv.URL+"/v1/chat/completions", chatBody, nil)
 	do(t, "GET", srv.URL+"/v1/models", "", map[string]string{"Authorization": "Bearer " + reviewKey})
-	if len(failures) != 2 || failures[0] != "missing" || failures[1] != "invalid" {
+	do(t, "GET", srv.URL+"/v1/models", "", map[string]string{"Authorization": "Basic dXNlcjpwYXNz"})
+	if len(failures) != 3 || failures[0] != "missing" || failures[1] != "invalid" || failures[2] != "invalid" {
 		t.Errorf("failures: %v", failures)
 	}
 	req, _ := http.NewRequest("GET", srv.URL+"/v1/models", nil)
