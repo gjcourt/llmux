@@ -1,15 +1,13 @@
-package main
+package openaicompat
+
+// Moved verbatim from the original main_test.go. These cover the pure transform
+// stages, which moved into this package unchanged.
 
 import (
-	"bytes"
 	"encoding/json"
-	"net/http"
-	"net/http/httptest"
 	"strings"
 	"testing"
 )
-
-// --- hasTools ---
 
 func TestHasTools(t *testing.T) {
 	t.Parallel()
@@ -31,8 +29,6 @@ func TestHasTools(t *testing.T) {
 		})
 	}
 }
-
-// --- forceNoStream ---
 
 func TestForceNoStream_AddsField(t *testing.T) {
 	t.Parallel()
@@ -59,8 +55,6 @@ func TestForceNoStream_OverridesTrue(t *testing.T) {
 		t.Fatalf("expected stream=false, got %s", m["stream"])
 	}
 }
-
-// --- applyToolCallTransform ---
 
 func ollamaResp(content string) []byte {
 	r := map[string]any{
@@ -173,7 +167,9 @@ func TestTransform_StripFullThinkBlock(t *testing.T) {
 }
 
 // TestTransform_StripThinkNoToolCall verifies that <think> stripping works
+
 // even when the model responds conversationally (no tool calls).
+
 func TestTransform_StripThinkNoToolCall(t *testing.T) {
 	t.Parallel()
 	input := ollamaResp("<think>internal reasoning</think>\nHello! How can I help?")
@@ -375,8 +371,6 @@ func TestTransform_AllToolCallsParseFail_FinishReasonNotOverridden(t *testing.T)
 	}
 }
 
-// --- stripTools ---
-
 func TestStripTools_RemovesTools(t *testing.T) {
 	t.Parallel()
 	body := `{"model":"x","tools":[{"type":"function"}],"tool_choice":"auto","messages":[]}`
@@ -395,8 +389,6 @@ func TestStripTools_RemovesTools(t *testing.T) {
 		t.Error("messages key should be preserved")
 	}
 }
-
-// --- isEmptyNonToolResponse ---
 
 func TestIsEmptyNonToolResponse(t *testing.T) {
 	t.Parallel()
@@ -428,8 +420,6 @@ func TestIsEmptyNonToolResponse_WithToolCalls(t *testing.T) {
 	}
 }
 
-// --- hasToolResultMessages ---
-
 func TestHasToolResultMessages_WithToolRole(t *testing.T) {
 	body := `{"messages":[{"role":"user","content":"hi"},{"role":"assistant","content":"","tool_calls":[{"id":"c1","type":"function","function":{"name":"f","arguments":"{}"}}]},{"role":"tool","tool_call_id":"c1","content":"result"}]}`
 	if !hasToolResultMessages([]byte(body)) {
@@ -444,254 +434,24 @@ func TestHasToolResultMessages_NoToolRole(t *testing.T) {
 	}
 }
 
-// --- requestedStream ---
-
-func TestRequestedStream_True(t *testing.T) {
-	if !requestedStream([]byte(`{"model":"x","stream":true}`)) {
-		t.Fatal("expected requestedStream=true")
-	}
-}
-
-func TestRequestedStream_False(t *testing.T) {
-	if requestedStream([]byte(`{"model":"x","stream":false}`)) {
-		t.Fatal("expected requestedStream=false")
-	}
-}
-
-func TestRequestedStream_Absent(t *testing.T) {
-	if requestedStream([]byte(`{"model":"x"}`)) {
-		t.Fatal("expected requestedStream=false when field absent")
-	}
-}
-
-// --- writeAsSSE ---
-
 // parseSSEEvents splits an SSE body into the data payloads (strips "data: " prefix and blank lines).
-func parseSSEEvents(body string) []string {
-	var events []string
-	for _, line := range strings.Split(body, "\n") {
-		line = strings.TrimRight(line, "\r")
-		if strings.HasPrefix(line, "data: ") {
-			events = append(events, strings.TrimPrefix(line, "data: "))
-		}
-	}
-	return events
-}
-
-func TestWriteAsSSE_ToolCall(t *testing.T) {
-	input := ollamaResp(`<tool_call>{"name":"web_search","arguments":{"query":"cats"}}</tool_call>`)
-	transformed, err := applyToolCallTransform(input)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	rr := httptest.NewRecorder()
-	writeAsSSE(rr, transformed)
-
-	events := parseSSEEvents(rr.Body.String())
-	if len(events) == 0 {
-		t.Fatal("no SSE events emitted")
-	}
-	if events[len(events)-1] != "[DONE]" {
-		t.Errorf("last event should be [DONE], got %q", events[len(events)-1])
-	}
-
-	// Collect tool_call deltas.
-	var toolCallName, toolCallArgs string
-	for _, ev := range events {
-		if ev == "[DONE]" {
-			continue
-		}
-		var chunk sseChunk
-		if err := json.Unmarshal([]byte(ev), &chunk); err != nil {
-			t.Fatalf("invalid SSE JSON: %v\nevent: %s", err, ev)
-		}
-		if len(chunk.Choices) == 0 {
-			continue
-		}
-		for _, tc := range chunk.Choices[0].Delta.ToolCalls {
-			if tc.Function != nil {
-				toolCallName += tc.Function.Name
-				toolCallArgs += tc.Function.Arguments
-			}
-		}
-	}
-	if toolCallName != "web_search" {
-		t.Errorf("tool name: want web_search, got %q", toolCallName)
-	}
-	var args map[string]string
-	if err := json.Unmarshal([]byte(toolCallArgs), &args); err != nil {
-		t.Fatalf("tool arguments not valid JSON: %v", err)
-	}
-	if args["query"] != "cats" {
-		t.Errorf("tool arg query: want cats, got %q", args["query"])
-	}
-
-	// Final chunk must have finish_reason: tool_calls.
-	var finalChunk sseChunk
-	for _, ev := range events {
-		if ev == "[DONE]" {
-			continue
-		}
-		var ch sseChunk
-		if err := json.Unmarshal([]byte(ev), &ch); err != nil {
-			continue
-		}
-		if len(ch.Choices) > 0 && ch.Choices[0].FinishReason != nil && *ch.Choices[0].FinishReason != "" {
-			finalChunk = ch
-		}
-	}
-	if len(finalChunk.Choices) == 0 || finalChunk.Choices[0].FinishReason == nil || *finalChunk.Choices[0].FinishReason != "tool_calls" {
-		t.Errorf("final chunk finish_reason: want tool_calls, got %+v", finalChunk)
-	}
-}
-
-func TestWriteAsSSE_PlainText(t *testing.T) {
-	input := ollamaResp("Hello there!")
-	// No tool calls, so transform is a no-op pass-through.
-	transformed, _ := applyToolCallTransform(input)
-
-	rr := httptest.NewRecorder()
-	writeAsSSE(rr, transformed)
-
-	events := parseSSEEvents(rr.Body.String())
-	if len(events) == 0 || events[len(events)-1] != "[DONE]" {
-		t.Fatalf("expected [DONE] as last event, got %v", events)
-	}
-
-	var contentSeen string
-	for _, ev := range events {
-		if ev == "[DONE]" {
-			continue
-		}
-		var chunk sseChunk
-		if err := json.Unmarshal([]byte(ev), &chunk); err != nil {
-			t.Fatalf("invalid SSE JSON: %v", err)
-		}
-		if len(chunk.Choices) > 0 && chunk.Choices[0].Delta.Content != nil {
-			contentSeen += *chunk.Choices[0].Delta.Content
-		}
-	}
-	if contentSeen != "Hello there!" {
-		t.Errorf("content: want %q, got %q", "Hello there!", contentSeen)
-	}
-}
-
-func TestWriteAsSSE_MultipleToolCalls(t *testing.T) {
-	input := ollamaResp(
-		`<tool_call>{"name":"a","arguments":{}}</tool_call>` + "\n" +
-			`<tool_call>{"name":"b","arguments":{"x":1}}</tool_call>`,
-	)
-	transformed, err := applyToolCallTransform(input)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	rr := httptest.NewRecorder()
-	writeAsSSE(rr, transformed)
-
-	events := parseSSEEvents(rr.Body.String())
-	names := map[string]bool{}
-	for _, ev := range events {
-		if ev == "[DONE]" {
-			continue
-		}
-		var chunk sseChunk
-		if err := json.Unmarshal([]byte(ev), &chunk); err != nil {
-			t.Fatalf("invalid SSE JSON: %v", err)
-		}
-		if len(chunk.Choices) > 0 {
-			for _, tc := range chunk.Choices[0].Delta.ToolCalls {
-				if tc.Function != nil && tc.Function.Name != "" {
-					names[tc.Function.Name] = true
-				}
-			}
-		}
-	}
-	if !names["a"] || !names["b"] {
-		t.Errorf("expected tool names a and b in SSE events, got %v", names)
-	}
-}
-
-// --- proxyTransformInner (integration) ---
 
 // fakeOllama returns an httptest.Server whose handler calls fn for each request.
-func fakeOllama(fn func(callN int, w http.ResponseWriter)) *httptest.Server {
-	callN := 0
-	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		callN++
-		w.Header().Set("Content-Type", "application/json")
-		fn(callN, w)
-	}))
-}
-
-func writeOllamaResp(w http.ResponseWriter, content string) {
-	json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
-		"id": "chatcmpl-test", "object": "chat.completion", "model": "test",
-		"choices": []map[string]any{{
-			"index":         0,
-			"message":       map[string]any{"role": "assistant", "content": content},
-			"finish_reason": "stop",
-		}},
-	})
-}
 
 // TestProxyTransform_EmptyRetryExtractsToolCall is the regression test for the case
+
 // where the model returns empty on the first call (confused by tools), then on the
+
 // retry generates <tool_call> XML in plain text. The retry must go through the
+
 // transform path so the XML becomes proper SSE tool_calls deltas — not raw text.
-func TestProxyTransform_EmptyRetryExtractsToolCall(t *testing.T) {
-	upstream := fakeOllama(func(callN int, w http.ResponseWriter) {
-		if callN == 1 {
-			writeOllamaResp(w, "") // empty first response
-		} else {
-			// Retry: model generates <tool_call> in text even without tools in request.
-			writeOllamaResp(w, `Bing blocked. Let me try another way.<tool_call>{"name":"web_search","arguments":{"query":"test"}}</tool_call>`)
-		}
-	})
-	defer upstream.Close()
-
-	originalBody := []byte(`{"model":"test","messages":[{"role":"user","content":"search"}],"tools":[{"type":"function","function":{"name":"web_search","parameters":{"type":"object"}}}],"stream":true}`)
-	req := httptest.NewRequest("POST", "/v1/chat/completions", bytes.NewReader(originalBody))
-	req.Header.Set("Content-Type", "application/json")
-	rr := httptest.NewRecorder()
-
-	proxyTransformInner(rr, req, upstream.URL, forceNoStream(originalBody), originalBody, false)
-
-	body := rr.Body.String()
-
-	// Must NOT contain raw <tool_call> XML — that would mean it was passed through as text.
-	if strings.Contains(body, "<tool_call>") {
-		t.Error("response must not contain raw <tool_call> XML; expected SSE tool_calls deltas")
-	}
-
-	// Must contain proper SSE tool_calls delta with the right tool name.
-	events := parseSSEEvents(body)
-	var toolCallName string
-	for _, ev := range events {
-		if ev == "[DONE]" {
-			continue
-		}
-		var chunk sseChunk
-		if err := json.Unmarshal([]byte(ev), &chunk); err != nil {
-			continue
-		}
-		if len(chunk.Choices) > 0 {
-			for _, tc := range chunk.Choices[0].Delta.ToolCalls {
-				if tc.Function != nil && tc.Function.Name != "" {
-					toolCallName = tc.Function.Name
-				}
-			}
-		}
-	}
-	if toolCallName != "web_search" {
-		t.Errorf("expected SSE tool_calls delta with name=web_search, got %q", toolCallName)
-	}
-}
 
 // TestTransform_PythonRegexEscapes verifies that \s, \d, \w inside Python regex
+
 // strings in execute_code arguments are accepted (repaired to \\s etc.) rather
+
 // than causing a JSON parse failure.
+
 func TestTransform_PythonRegexEscapes(t *testing.T) {
 	// Literal \s \d \w are invalid JSON escape sequences; the model emits them
 	// verbatim inside string values when writing Python regex patterns.
@@ -722,49 +482,15 @@ func TestTransform_PythonRegexEscapes(t *testing.T) {
 }
 
 // TestProxyTransform_EmptyRetryDoesNotLoop verifies that if both the original
+
 // and the retry response are empty, we do not recurse infinitely — the second
+
 // empty response is written through as-is.
-func TestProxyTransform_EmptyRetryDoesNotLoop(t *testing.T) {
-	calls := 0
-	upstream := fakeOllama(func(callN int, w http.ResponseWriter) {
-		calls++
-		writeOllamaResp(w, "") // always empty
-	})
-	defer upstream.Close()
-
-	originalBody := []byte(`{"model":"test","messages":[{"role":"user","content":"hi"}],"tools":[{"type":"function","function":{"name":"f","parameters":{"type":"object"}}}],"stream":true}`)
-	req := httptest.NewRequest("POST", "/v1/chat/completions", bytes.NewReader(originalBody))
-	req.Header.Set("Content-Type", "application/json")
-	rr := httptest.NewRecorder()
-
-	proxyTransformInner(rr, req, upstream.URL, forceNoStream(originalBody), originalBody, false)
-
-	if calls != 2 {
-		t.Errorf("expected exactly 2 upstream calls (original + one retry), got %d", calls)
-	}
-}
 
 // TestProxyTransform_NoRetryAfterToolResults verifies that an empty response from
+
 // the model is NOT retried when the conversation history already contains role:"tool"
+
 // messages. Stripping tools from such a history creates a mangled context that makes
+
 // the model hallucinate partial <tool_call> fragments.
-func TestProxyTransform_NoRetryAfterToolResults(t *testing.T) {
-	calls := 0
-	upstream := fakeOllama(func(callN int, w http.ResponseWriter) {
-		calls++
-		writeOllamaResp(w, "") // empty response after tool result
-	})
-	defer upstream.Close()
-
-	// originalBody has a role:"tool" message in history — tools have already been dispatched.
-	originalBody := []byte(`{"model":"test","messages":[{"role":"user","content":"hi"},{"role":"assistant","content":null,"tool_calls":[{"id":"c1","type":"function","function":{"name":"f","arguments":"{}"}}]},{"role":"tool","tool_call_id":"c1","content":"result"}],"tools":[{"type":"function","function":{"name":"f","parameters":{"type":"object"}}}],"stream":true}`)
-	req := httptest.NewRequest("POST", "/v1/chat/completions", bytes.NewReader(originalBody))
-	req.Header.Set("Content-Type", "application/json")
-	rr := httptest.NewRecorder()
-
-	proxyTransformInner(rr, req, upstream.URL, forceNoStream(originalBody), originalBody, false)
-
-	if calls != 1 {
-		t.Errorf("expected exactly 1 upstream call (no retry after tool results), got %d", calls)
-	}
-}
