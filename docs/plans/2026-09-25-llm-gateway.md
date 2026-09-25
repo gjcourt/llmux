@@ -95,7 +95,7 @@ WebUI's and renovate-review's secrets — and give the new one to llmux only.
 
 ## Phases (one PR each unless noted)
 
-1. **Client keys + `client` label** (llmux). Then homelab: Open WebUI's
+1. **Client keys + `client` label** (llmux) — built: `LLMUX_CLIENT_KEYS`, `LLMUX_REQUIRE_CLIENT_KEYS`. Then homelab: Open WebUI's
    `OPENAI_API_KEY` becomes its llmux client key — which also takes the real
    Anthropic key out of Open WebUI.
 2. **Native `/v1/messages` pass-through lane** (llmux), with metering and

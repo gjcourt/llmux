@@ -170,3 +170,37 @@ func TestProvidersFromEnv_WebSearchStreamOnly(t *testing.T) {
 		t.Error("want an error for a non-boolean")
 	}
 }
+
+func TestClientKeysFromEnv(t *testing.T) {
+	long := "0123456789abcdef0123456789abcdef"
+	t.Setenv("LLMUX_CLIENT_KEYS", "openwebui="+long+"a, renovate-review="+long+"b")
+	keys, err := clientKeysFromEnv()
+	if err != nil || len(keys) != 2 || keys["openwebui"] != long+"a" {
+		t.Fatalf("keys %v err %v", keys, err)
+	}
+	for _, bad := range []string{
+		"openwebui",                      // no key
+		"OpenWebUI=" + long,              // name not lowercase
+		"anonymous=" + long,              // reserved
+		"openwebui=short",                // too short
+		"a=" + long + ",a=" + long + "x", // duplicate name
+		"a=" + long + ",b=" + long,       // shared key
+	} {
+		t.Setenv("LLMUX_CLIENT_KEYS", bad)
+		if _, err := clientKeysFromEnv(); err == nil {
+			t.Errorf("%q: want error", bad)
+		}
+	}
+}
+
+func TestClientKeysFromEnv_Required(t *testing.T) {
+	t.Setenv("LLMUX_CLIENT_KEYS", "")
+	t.Setenv("LLMUX_REQUIRE_CLIENT_KEYS", "true")
+	if _, err := clientKeysFromEnv(); err == nil {
+		t.Error("required but empty must be an error")
+	}
+	t.Setenv("LLMUX_REQUIRE_CLIENT_KEYS", "false")
+	if keys, err := clientKeysFromEnv(); err != nil || len(keys) != 0 {
+		t.Errorf("optional and empty: %v %v", keys, err)
+	}
+}

@@ -93,6 +93,10 @@ Full description: [Architecture Overview](docs/architecture/2026-07-25-overview.
 
 Tool-calling models in vLLM/Ollama frequently return malformed JSON tool calls — `<tool_call>` XML wrappers, orphan `<think>` tags, missing terminators. llmux sits between a tool-aware client (Open Interpreter, Claude Code, etc.) and the model server, repairing the response so downstream parsers don't choke.
 
+## Client keys
+
+Every `/v1` request can be required to carry an llmux **client key**, as `Authorization: Bearer <key>` (OpenAI clients) or `x-api-key: <key>` (Anthropic SDKs) — wherever the client would put a provider key. `LLMUX_CLIENT_KEYS="name=key,name=key"` comes from a secret; the name labels every metric (`client`). No keys → authentication off, every caller `anonymous`. `LLMUX_REQUIRE_CLIENT_KEYS=true` refuses to start without keys (set it in production). Keys are compared as SHA-256 digests in constant time; `/healthz` stays open for probes. Plan: `docs/plans/2026-09-25-llm-gateway.md`.
+
 ## Cross-service dependencies
 
 | Service | Endpoint | Purpose |

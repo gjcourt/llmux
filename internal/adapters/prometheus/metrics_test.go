@@ -16,26 +16,26 @@ import (
 
 func TestMetrics_RecordsAnswer(t *testing.T) {
 	m := New()
-	m.ChatStarted("anthropic", "claude-sonnet-5")
-	if v := testutil.ToFloat64(m.inFlight.WithLabelValues("anthropic", "claude-sonnet-5")); v != 1 {
+	m.ChatStarted("web", "anthropic", "claude-sonnet-5")
+	if v := testutil.ToFloat64(m.inFlight.WithLabelValues("web", "anthropic", "claude-sonnet-5")); v != 1 {
 		t.Errorf("in flight = %v", v)
 	}
-	m.ChatFinished(outbound.ChatObservation{
+	m.ChatFinished(outbound.ChatObservation{Client: "web",
 		Provider: "anthropic", Model: "claude-sonnet-5", Stream: true, Outcome: outbound.OutcomeOK,
 		Duration: 3 * time.Second, TimeToFirstToken: 800 * time.Millisecond,
 		Usage:     &domain.Usage{PromptTokens: 1000, CompletionTokens: 50, CacheReadTokens: 300, CacheWriteTokens: 200, WebSearches: 2},
 		Citations: 3, FinishReason: "stop",
 	})
 	checks := map[string]float64{
-		"in_flight":   testutil.ToFloat64(m.inFlight.WithLabelValues("anthropic", "claude-sonnet-5")),
-		"requests":    testutil.ToFloat64(m.requests.WithLabelValues("anthropic", "claude-sonnet-5", "true", "ok")),
-		"input":       testutil.ToFloat64(m.tokens.WithLabelValues("anthropic", "claude-sonnet-5", "input")),
-		"cache_read":  testutil.ToFloat64(m.tokens.WithLabelValues("anthropic", "claude-sonnet-5", "cache_read")),
-		"cache_write": testutil.ToFloat64(m.tokens.WithLabelValues("anthropic", "claude-sonnet-5", "cache_write")),
-		"output":      testutil.ToFloat64(m.tokens.WithLabelValues("anthropic", "claude-sonnet-5", "output")),
-		"searches":    testutil.ToFloat64(m.searches.WithLabelValues("anthropic", "claude-sonnet-5")),
-		"citations":   testutil.ToFloat64(m.citations.WithLabelValues("anthropic", "claude-sonnet-5")),
-		"finish_stop": testutil.ToFloat64(m.finishes.WithLabelValues("anthropic", "claude-sonnet-5", "stop")),
+		"in_flight":   testutil.ToFloat64(m.inFlight.WithLabelValues("web", "anthropic", "claude-sonnet-5")),
+		"requests":    testutil.ToFloat64(m.requests.WithLabelValues("web", "anthropic", "claude-sonnet-5", "true", "ok")),
+		"input":       testutil.ToFloat64(m.tokens.WithLabelValues("web", "anthropic", "claude-sonnet-5", "input")),
+		"cache_read":  testutil.ToFloat64(m.tokens.WithLabelValues("web", "anthropic", "claude-sonnet-5", "cache_read")),
+		"cache_write": testutil.ToFloat64(m.tokens.WithLabelValues("web", "anthropic", "claude-sonnet-5", "cache_write")),
+		"output":      testutil.ToFloat64(m.tokens.WithLabelValues("web", "anthropic", "claude-sonnet-5", "output")),
+		"searches":    testutil.ToFloat64(m.searches.WithLabelValues("web", "anthropic", "claude-sonnet-5")),
+		"citations":   testutil.ToFloat64(m.citations.WithLabelValues("web", "anthropic", "claude-sonnet-5")),
+		"finish_stop": testutil.ToFloat64(m.finishes.WithLabelValues("web", "anthropic", "claude-sonnet-5", "stop")),
 	}
 	want := map[string]float64{"in_flight": 0, "requests": 1, "input": 500, "cache_read": 300, "cache_write": 200, "output": 50, "searches": 2, "citations": 3, "finish_stop": 1}
 	for k, w := range want {
@@ -55,17 +55,17 @@ func TestMetrics_RecordsAnswer(t *testing.T) {
 // billed, so they count; a successful answer with no usage is flagged.
 func TestMetrics_UsageEdgeCases(t *testing.T) {
 	m := New()
-	m.ChatStarted("p", "m")
-	m.ChatFinished(outbound.ChatObservation{Provider: "p", Model: "m", Outcome: outbound.OutcomeUpstream5xx, Usage: &domain.Usage{PromptTokens: 10, CompletionTokens: 5}})
-	if v := testutil.ToFloat64(m.tokens.WithLabelValues("p", "m", "output")); v != 5 {
+	m.ChatStarted("web", "p", "m")
+	m.ChatFinished(outbound.ChatObservation{Client: "web", Provider: "p", Model: "m", Outcome: outbound.OutcomeUpstream5xx, Usage: &domain.Usage{PromptTokens: 10, CompletionTokens: 5}})
+	if v := testutil.ToFloat64(m.tokens.WithLabelValues("web", "p", "m", "output")); v != 5 {
 		t.Errorf("output = %v", v)
 	}
-	m.ChatStarted("p", "m")
-	m.ChatFinished(outbound.ChatObservation{Provider: "p", Model: "m", Outcome: outbound.OutcomeOK})
-	if v := testutil.ToFloat64(m.noUsage.WithLabelValues("p", "m")); v != 1 {
+	m.ChatStarted("web", "p", "m")
+	m.ChatFinished(outbound.ChatObservation{Client: "web", Provider: "p", Model: "m", Outcome: outbound.OutcomeOK})
+	if v := testutil.ToFloat64(m.noUsage.WithLabelValues("web", "p", "m")); v != 1 {
 		t.Errorf("usage missing = %v", v)
 	}
-	if v := testutil.ToFloat64(m.inFlight.WithLabelValues("p", "m")); v != 0 {
+	if v := testutil.ToFloat64(m.inFlight.WithLabelValues("web", "p", "m")); v != 0 {
 		t.Errorf("in flight = %v", v)
 	}
 }
@@ -74,8 +74,8 @@ func TestMetrics_UsageEdgeCases(t *testing.T) {
 // was never started) or the latency histograms.
 func TestMetrics_NoProvider(t *testing.T) {
 	m := New()
-	m.ChatFinished(outbound.ChatObservation{Provider: "none", Model: "unrouted", Outcome: outbound.OutcomeNoProvider})
-	if v := testutil.ToFloat64(m.requests.WithLabelValues("none", "unrouted", "false", "no_provider")); v != 1 {
+	m.ChatFinished(outbound.ChatObservation{Client: "web", Provider: "none", Model: "unrouted", Outcome: outbound.OutcomeNoProvider})
+	if v := testutil.ToFloat64(m.requests.WithLabelValues("web", "none", "unrouted", "false", "no_provider")); v != 1 {
 		t.Errorf("requests = %v", v)
 	}
 	if testutil.CollectAndCount(m.inFlight) != 0 || testutil.CollectAndCount(m.duration) != 0 { // New pre-creates only the unrouted request series
@@ -85,14 +85,14 @@ func TestMetrics_NoProvider(t *testing.T) {
 
 func TestMetrics_Handler(t *testing.T) {
 	m := New()
-	m.ChatStarted("anthropic", "claude-haiku-4-5")
-	m.ChatFinished(outbound.ChatObservation{Provider: "anthropic", Model: "claude-haiku-4-5", Outcome: outbound.OutcomeOK, Usage: &domain.Usage{PromptTokens: 1}})
+	m.ChatStarted("web", "anthropic", "claude-haiku-4-5")
+	m.ChatFinished(outbound.ChatObservation{Client: "web", Provider: "anthropic", Model: "claude-haiku-4-5", Outcome: outbound.OutcomeOK, Usage: &domain.Usage{PromptTokens: 1}})
 	rec := httptest.NewRecorder()
 	m.Handler().ServeHTTP(rec, httptest.NewRequest("GET", "/metrics", nil))
 	b, _ := io.ReadAll(rec.Body)
 	for _, want := range []string{
-		`llmux_chat_requests_total{model="claude-haiku-4-5",outcome="ok",provider="anthropic",stream="false"} 1`,
-		`llmux_tokens_total{model="claude-haiku-4-5",provider="anthropic",type="input"} 1`,
+		`llmux_chat_requests_total{client="web",model="claude-haiku-4-5",outcome="ok",provider="anthropic",stream="false"} 1`,
+		`llmux_tokens_total{client="web",model="claude-haiku-4-5",provider="anthropic",type="input"} 1`,
 		"go_goroutines", "process_resident_memory_bytes",
 	} {
 		if !strings.Contains(string(b), want) {
@@ -105,17 +105,19 @@ func TestMetrics_Handler(t *testing.T) {
 // is visible to increase().
 func TestMetrics_Declare(t *testing.T) {
 	m := New()
-	m.Declare("anthropic", []string{"claude-sonnet-5", "claude-haiku-4-5"})
-	if n := testutil.CollectAndCount(m.requests); n != 2*2*7+2 {
-		t.Errorf("request series = %d, want %d", n, 2*2*7+2)
+	m.Declare([]string{"web"}, "anthropic", []string{"claude-sonnet-5", "claude-haiku-4-5"})
+	// per model: 2 stream values × 7 outcomes; plus the unrouted series for
+	// the declared client and for "anonymous" (pre-created by New).
+	if n := testutil.CollectAndCount(m.requests); n != 2*2*7+2+2 {
+		t.Errorf("request series = %d, want %d", n, 2*2*7+2+2)
 	}
 	if n := testutil.CollectAndCount(m.tokens); n != 2*4 {
 		t.Errorf("token series = %d", n)
 	}
-	if v := testutil.ToFloat64(m.requests.WithLabelValues("anthropic", "claude-sonnet-5", "true", "ok")); v != 0 {
+	if v := testutil.ToFloat64(m.requests.WithLabelValues("web", "anthropic", "claude-sonnet-5", "true", "ok")); v != 0 {
 		t.Errorf("declared series must start at 0, got %v", v)
 	}
-	if v := testutil.ToFloat64(m.requests.WithLabelValues("none", "unrouted", "false", "no_provider")); v != 0 {
+	if v := testutil.ToFloat64(m.requests.WithLabelValues("web", "none", "unrouted", "false", "no_provider")); v != 0 {
 		t.Errorf("unrouted series must exist at 0, got %v", v)
 	}
 }
@@ -123,8 +125,8 @@ func TestMetrics_Declare(t *testing.T) {
 // Only successful answers feed the duration histogram.
 func TestMetrics_DurationOnlyForOK(t *testing.T) {
 	m := New()
-	m.ChatStarted("p", "m")
-	m.ChatFinished(outbound.ChatObservation{Provider: "p", Model: "m", Outcome: outbound.OutcomeUpstream5xx, Duration: time.Second})
+	m.ChatStarted("web", "p", "m")
+	m.ChatFinished(outbound.ChatObservation{Client: "web", Provider: "p", Model: "m", Outcome: outbound.OutcomeUpstream5xx, Duration: time.Second})
 	if n := testutil.CollectAndCount(m.duration); n != 0 {
 		t.Errorf("a failed request created %d duration series", n)
 	}
@@ -135,7 +137,7 @@ func TestMetrics_DurationOnlyForOK(t *testing.T) {
 // that never move, next to live ones that were born at 1).
 func TestMetrics_DeclareMatchesTraffic(t *testing.T) {
 	m := New()
-	m.Declare("anthropic", []string{"a"})
+	m.Declare([]string{"web"}, "anthropic", []string{"a"})
 	count := func() int {
 		n := 0
 		for _, c := range []prometheus.Collector{m.requests, m.inFlight, m.tokens, m.searches, m.citations, m.finishes, m.noUsage} {
@@ -148,14 +150,14 @@ func TestMetrics_DeclareMatchesTraffic(t *testing.T) {
 	for _, stream := range []bool{true, false} {
 		for _, o := range outcomes {
 			for _, fr := range []string{"stop", "length", "content_filter"} {
-				m.ChatStarted("anthropic", "a")
-				m.ChatFinished(outbound.ChatObservation{Provider: "anthropic", Model: "a", Stream: stream, Outcome: o, FinishReason: fr,
+				m.ChatStarted("web", "anthropic", "a")
+				m.ChatFinished(outbound.ChatObservation{Client: "web", Provider: "anthropic", Model: "a", Stream: stream, Outcome: o, FinishReason: fr,
 					Duration: time.Second, TimeToFirstToken: time.Millisecond, Citations: 1,
 					Usage: &domain.Usage{PromptTokens: 10, CompletionTokens: 1, CacheReadTokens: 2, CacheWriteTokens: 1, WebSearches: 1}})
 			}
 		}
-		m.ChatStarted("anthropic", "a")
-		m.ChatFinished(outbound.ChatObservation{Provider: "anthropic", Model: "a", Stream: stream, Outcome: outbound.OutcomeOK})
+		m.ChatStarted("web", "anthropic", "a")
+		m.ChatFinished(outbound.ChatObservation{Client: "web", Provider: "anthropic", Model: "a", Stream: stream, Outcome: outbound.OutcomeOK})
 	}
 	if after := count(); after != before {
 		t.Errorf("traffic added %d series beyond the declared ones", after-before)

@@ -51,7 +51,7 @@ format.
 
 ## Metrics
 
-All labelled `provider`, `model`.
+All labelled `client`, `provider`, `model`. `client` is the llmux client key's name (`anonymous` when client keys are off).
 
 | Metric | Type | Extra labels | Notes |
 |---|---|---|---|
