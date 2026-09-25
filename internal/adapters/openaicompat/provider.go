@@ -9,7 +9,6 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -334,9 +333,8 @@ func relaySSE(r io.Reader, sink domain.EventSink) error {
 		}
 	}
 	if err := sc.Err(); err != nil {
-		if errors.Is(err, context.Canceled) {
-			return nil
-		}
+		// Wrapped, not swallowed: on client cancellation the handler's own
+		// context.Canceled branch ends the response without writing [DONE].
 		return fmt.Errorf("read upstream stream: %w", err)
 	}
 	// vLLM and Ollama always end with [DONE]. A stream that stops without it

@@ -382,3 +382,24 @@ func TestRelaySSE_TruncatedIsError(t *testing.T) {
 		t.Errorf("text before the cut must still be relayed, got %q", rec.text())
 	}
 }
+
+type cancelledReader struct{ data string }
+
+func (c *cancelledReader) Read(p []byte) (int, error) {
+	if c.data == "" {
+		return 0, context.Canceled
+	}
+	n := copy(p, c.data)
+	c.data = c.data[n:]
+	return n, nil
+}
+
+// Critique pass 3: a client that went away must not look like a finished
+// stream; the handler's context.Canceled branch skips writing [DONE].
+func TestRelaySSE_CancelPropagates(t *testing.T) {
+	r := &cancelledReader{data: `data: {"id":"c","model":"m","choices":[{"delta":{"content":"hi"}}]}` + "\n\n"}
+	err := relaySSE(r, &recorder{})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("want context.Canceled, got %v", err)
+	}
+}
