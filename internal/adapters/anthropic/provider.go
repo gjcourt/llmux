@@ -99,6 +99,14 @@ func (p *Provider) Chat(ctx context.Context, req domain.ChatRequest, sink domain
 	for resumes := 0; ; resumes++ {
 		t, err := p.send(ctx, body, st, sink)
 		if err != nil {
+			// Tokens consumed before the failure — a cancelled answer, a
+			// failed resume — were billed; report them so usage telemetry
+			// doesn't silently drop them. Output of the unfinished turn is
+			// unknown (only message_delta carries it), so it undercounts.
+			// Best effort: the client may already be gone.
+			if u := st.spent(); u.TotalTokens > 0 {
+				_ = sink.Emit(domain.Event{Kind: domain.EventUsage, Usage: u})
+			}
 			return err
 		}
 		if t.stopReason != "pause_turn" {

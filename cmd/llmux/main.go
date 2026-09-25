@@ -62,6 +62,11 @@ func run() error {
 
 	// Metrics get their own listener so the chat port can stay reachable
 	// from Open WebUI alone, and the scrape port from Prometheus alone.
+	// The metrics server has its own context, cancelled only after the chat
+	// server has drained, so counts from requests finishing during the
+	// drain stay scrapeable for as long as possible.
+	mctx, stopMetrics := context.WithCancel(context.Background())
+	defer stopMetrics()
 	metricsDone := make(chan error, 1)
 	if maddr := envOr("LLMUX_METRICS_ADDR", ":9090"); maddr != "" {
 		metrics := prommetrics.New()
@@ -74,7 +79,14 @@ func run() error {
 		}
 		slog.Info("metrics listening", "addr", mln.Addr().String())
 		msrv := &http.Server{Handler: mux, ReadHeaderTimeout: 10 * time.Second}
-		go func() { metricsDone <- serve(ctx, msrv, mln, 5*time.Second) }()
+		go func() {
+			err := serve(mctx, msrv, mln, 5*time.Second)
+			if err != nil {
+				// Chat keeps serving; say so now rather than only at exit.
+				slog.Error("metrics server failed", "err", err)
+			}
+			metricsDone <- err
+		}()
 	} else {
 		metricsDone <- nil
 	}
@@ -89,7 +101,7 @@ func run() error {
 	}
 	slog.Info("llmux listening", "addr", ln.Addr().String(), "providers", len(providers))
 	err = serve(ctx, srv, ln, 25*time.Second)
-	stop() // if the chat server failed on its own, take the metrics server down too
+	stopMetrics() // chat has drained (or failed on its own): metrics go last
 	return errors.Join(err, <-metricsDone)
 }
 

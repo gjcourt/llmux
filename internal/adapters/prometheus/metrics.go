@@ -59,9 +59,9 @@ func New() *Metrics {
 	}, []string{"provider", "model", "stream"})
 	m.ttft = prometheus.NewHistogramVec(prometheus.HistogramOpts{
 		Name:    "llmux_chat_time_to_first_token_seconds",
-		Help:    "Time from request to the first text or tool-call token. Web search happens before the first token.",
+		Help:    "Time from request to the first text or tool-call token. Web search happens before the first token. For a non-streamed vLLM/Ollama answer it is the whole answer's time.",
 		Buckets: []float64{0.1, 0.25, 0.5, 1, 2, 4, 8, 15, 30, 60},
-	}, []string{"provider", "model"})
+	}, []string{"provider", "model", "stream"})
 	m.tokens = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "llmux_tokens_total",
 		Help: "Tokens by provider, model and type: input (uncached), cache_read, cache_write, output.",
@@ -80,7 +80,7 @@ func New() *Metrics {
 	}, []string{"provider", "model", "reason"})
 	m.noUsage = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Name: "llmux_chat_usage_missing_total",
-		Help: "Successful answers whose provider reported no token usage, so llmux_tokens_total undercounts them.",
+		Help: "Successful answers whose provider reported no token usage, so llmux_tokens_total undercounts them. (Failed requests often legitimately have none.)",
 	}, []string{"provider", "model"})
 
 	for _, c := range []prometheus.Collector{m.requests, m.inFlight, m.duration, m.ttft, m.tokens, m.searches, m.citations, m.finishes, m.noUsage} {
@@ -104,7 +104,7 @@ func (m *Metrics) ChatFinished(o outbound.ChatObservation) {
 	m.inFlight.WithLabelValues(p, mo).Dec()
 	m.duration.WithLabelValues(p, mo, strconv.FormatBool(o.Stream)).Observe(o.Duration.Seconds())
 	if o.TimeToFirstToken > 0 {
-		m.ttft.WithLabelValues(p, mo).Observe(o.TimeToFirstToken.Seconds())
+		m.ttft.WithLabelValues(p, mo, strconv.FormatBool(o.Stream)).Observe(o.TimeToFirstToken.Seconds())
 	}
 	if o.FinishReason != "" {
 		m.finishes.WithLabelValues(p, mo, o.FinishReason).Inc()

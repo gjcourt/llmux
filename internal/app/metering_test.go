@@ -127,3 +127,36 @@ func TestMetering_DefaultIsNop(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+type panicky struct{}
+
+func (panicky) Name() string                                   { return "panicky" }
+func (panicky) Handles(string) bool                            { return true }
+func (panicky) Models(context.Context) ([]domain.Model, error) { return nil, nil }
+func (panicky) Chat(context.Context, domain.ChatRequest, domain.EventSink) error {
+	panic("boom")
+}
+
+// A panicking provider still balances ChatStarted, and the panic propagates.
+func TestMetering_PanicStillFinishes(t *testing.T) {
+	m := &testdoubles.Metrics{}
+	func() {
+		defer func() {
+			if r := recover(); r != "boom" {
+				t.Errorf("panic must propagate, got %v", r)
+			}
+		}()
+		_ = app.New(panicky{}).WithMetrics(m).Chat(context.Background(), domain.ChatRequest{Model: "m"}, &recordingSink{})
+	}()
+	if len(m.Started) != 1 || len(m.Finished) != 1 || m.Finished[0].Outcome != outbound.OutcomeError {
+		t.Errorf("started %v finished %+v", m.Started, m.Finished)
+	}
+}
+
+func TestMetering_RedirectIsError(t *testing.T) {
+	m := &testdoubles.Metrics{}
+	_ = app.New(&testdoubles.Provider{Err: &domain.UpstreamError{Status: 307}}).WithMetrics(m).Chat(context.Background(), domain.ChatRequest{Model: "m"}, &recordingSink{})
+	if got := m.Finished[0].Outcome; got != outbound.OutcomeError {
+		t.Errorf("3xx outcome %q", got)
+	}
+}

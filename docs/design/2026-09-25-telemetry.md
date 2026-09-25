@@ -37,11 +37,15 @@ drops it.
 three (`message_delta` usage, summed across `pause_turn` resumes); OpenAI-
 compatible upstreams report cached tokens in `prompt_tokens_details`.
 
+A provider panic still records an observation (outcome `error`) before the
+panic continues, so the in-flight gauge can't stick.
+
 **Adapter:** `internal/adapters/prometheus`, `prometheus/client_golang` on its
 own registry (plus Go runtime and process collectors), served on a **separate
 listener**, `LLMUX_METRICS_ADDR` (default `:9090`; empty disables). The chat
 port stays reachable from Open WebUI only; the metrics port from Prometheus
-only. This is llmux's first third-party dependency — accepted for correct
+only. On SIGTERM the metrics server shuts down only after the chat server has
+drained. This is llmux's first third-party dependency — accepted for correct
 histograms and the standard runtime metrics over hand-writing the exposition
 format.
 
@@ -51,10 +55,10 @@ All labelled `provider`, `model`.
 
 | Metric | Type | Extra labels | Notes |
 |---|---|---|---|
-| `llmux_chat_requests_total` | counter | `stream`, `outcome` | outcome ∈ ok, invalid_request, no_provider, upstream_4xx, upstream_5xx, unavailable, canceled, error |
+| `llmux_chat_requests_total` | counter | `stream`, `outcome` | outcome ∈ ok, invalid_request, no_provider, upstream_4xx, upstream_5xx, unavailable, canceled, error — see `outbound.Outcome` for exactly what each covers. The HTTP adapter's own 400/413s happen before routing and aren't counted |
 | `llmux_chat_in_flight` | gauge | | |
 | `llmux_chat_duration_seconds` | histogram | `stream` | request → provider done; 0.25s–8m buckets |
-| `llmux_chat_time_to_first_token_seconds` | histogram | | first text/tool-call token; search happens before it |
+| `llmux_chat_time_to_first_token_seconds` | histogram | `stream` | first text/tool-call token; search happens before it. For a non-streamed vLLM/Ollama answer it equals the duration |
 | `llmux_tokens_total` | counter | `type` | input (uncached), cache_read, cache_write, output |
 | `llmux_web_searches_total` | counter | | server-side searches run |
 | `llmux_citations_total` | counter | | distinct sources cited |
@@ -66,8 +70,13 @@ served. An unrouted request is recorded as `provider="none", model="unrouted"`,
 so a client can't mint series with made-up ids. The one exception is the
 vLLM/Ollama catch-all, which serves any id; it's off by default.
 
-**Tokens are counted whenever reported**, failures included — tokens an
-answer consumed before failing were still billed.
+**Tokens are counted whenever reported, failures included** — tokens an
+answer consumed before failing were still billed. The Anthropic adapter
+reports what it knows on any failure after `message_start`: every completed
+turn in full, plus the unfinished turn's input (from `message_start`). The
+unfinished turn's *output* is only reported at its end, so a cancelled answer
+undercounts output — typically the smaller share. This matters: pressing Stop
+in Open WebUI is a cancellation.
 
 ## Not included
 

@@ -54,10 +54,13 @@ func classify(ctx context.Context, err error) outbound.Outcome {
 	case errors.Is(err, domain.ErrNoProvider):
 		return outbound.OutcomeNoProvider
 	case errors.As(err, &ue):
-		if ue.Status >= 400 && ue.Status < 500 {
+		switch {
+		case ue.Status >= 500:
+			return outbound.OutcomeUpstream5xx
+		case ue.Status >= 400:
 			return outbound.OutcomeUpstream4xx
 		}
-		return outbound.OutcomeUpstream5xx
+		return outbound.OutcomeError // a 3xx: misconfigured base URL
 	case errors.Is(err, domain.ErrUnavailable):
 		return outbound.OutcomeUnavailable
 	}

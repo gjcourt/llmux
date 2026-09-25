@@ -11,14 +11,21 @@ type Outcome string
 
 // Outcomes. The set is closed so metric label cardinality stays bounded.
 const (
-	OutcomeOK             Outcome = "ok"
-	OutcomeInvalidRequest Outcome = "invalid_request" // llmux refused it (400)
-	OutcomeNoProvider     Outcome = "no_provider"     // no provider serves the model (404)
+	OutcomeOK Outcome = "ok"
+	// A provider refused the request (400: tools, images, …). The HTTP
+	// adapter's own 400/413s (bad JSON, n>1, oversized body) happen before
+	// routing and are not observed.
+	OutcomeInvalidRequest Outcome = "invalid_request"
+	OutcomeNoProvider     Outcome = "no_provider" // no provider serves the model (404)
 	OutcomeUpstream4xx    Outcome = "upstream_4xx"
-	OutcomeUpstream5xx    Outcome = "upstream_5xx" // includes mid-stream errors (overloaded, …)
-	OutcomeUnavailable    Outcome = "unavailable"  // upstream unreachable
-	OutcomeCanceled       Outcome = "canceled"     // the client went away
-	OutcomeError          Outcome = "error"        // anything else (truncated stream, idle timeout, …)
+	// Upstream 5xx, and Anthropic's in-stream error events (overloaded, …),
+	// which carry a status.
+	OutcomeUpstream5xx Outcome = "upstream_5xx"
+	OutcomeUnavailable Outcome = "unavailable" // upstream unreachable
+	OutcomeCanceled    Outcome = "canceled"    // the client went away
+	// Anything else: a truncated or stalled stream, a vLLM/Ollama mid-stream
+	// error chunk, an upstream 3xx, a provider panic.
+	OutcomeError Outcome = "error"
 )
 
 // ChatObservation is everything telemetry learns about one chat request.
