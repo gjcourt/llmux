@@ -204,3 +204,17 @@ func TestClientKeysFromEnv_Required(t *testing.T) {
 		t.Errorf("optional and empty: %v %v", keys, err)
 	}
 }
+
+func TestProvidersFromEnv_ClientTools(t *testing.T) {
+	t.Setenv("LLMUX_ANTHROPIC_API_KEY", "k")
+	for _, v := range []string{"reject", "drop"} {
+		t.Setenv("LLMUX_CLIENT_TOOLS", v)
+		if _, err := providersFromEnv(); err != nil {
+			t.Errorf("%q: %v", v, err)
+		}
+	}
+	t.Setenv("LLMUX_CLIENT_TOOLS", "forward")
+	if _, err := providersFromEnv(); err == nil {
+		t.Error("unknown mode must be an error")
+	}
+}

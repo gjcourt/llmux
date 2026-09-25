@@ -362,11 +362,11 @@ func TestProvider_ResumeExtendsPrefill(t *testing.T) {
 }
 
 func TestBuildRequest_WebSearchTool(t *testing.T) {
-	off, _ := buildRequest(domain.ChatRequest{Model: "m", Messages: []domain.Message{user("x")}}, 10, 0)
+	off, _ := buildRequest(domain.ChatRequest{Model: "m", Messages: []domain.Message{user("x")}}, 10, 0, false)
 	if off.Tools != nil {
 		t.Error("0 must leave web search off")
 	}
-	on, _ := buildRequest(domain.ChatRequest{Model: "m", Messages: []domain.Message{user("x")}}, 10, 3)
+	on, _ := buildRequest(domain.ChatRequest{Model: "m", Messages: []domain.Message{user("x")}}, 10, 3, false)
 	b, _ := json.Marshal(on.Tools)
 	if string(b) != `[{"type":"web_search_20250305","name":"web_search","max_uses":3}]` {
 		t.Errorf("tools: %s", b)
@@ -376,7 +376,7 @@ func TestBuildRequest_WebSearchTool(t *testing.T) {
 // A client prefill (conversation ending in an assistant message) is extended,
 // not followed by a second assistant message.
 func TestWithContinuation_ExtendsPrefill(t *testing.T) {
-	r, _ := buildRequest(domain.ChatRequest{Model: "m", Messages: []domain.Message{user("x"), {Role: "assistant", Content: "Sure:"}}}, 10, 3)
+	r, _ := buildRequest(domain.ChatRequest{Model: "m", Messages: []domain.Message{user("x"), {Role: "assistant", Content: "Sure:"}}}, 10, 3, false)
 	r.withContinuation([]json.RawMessage{json.RawMessage(`{"type":"server_tool_use"}`)})
 	b, _ := json.Marshal(r.Messages)
 	if string(b) != `[{"role":"user","content":"x"},{"role":"assistant","content":[{"text":"Sure:","type":"text"},{"type":"server_tool_use"}]}]` {
