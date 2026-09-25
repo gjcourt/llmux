@@ -1,6 +1,6 @@
 ---
 title: llmux as the one LLM gateway for the homelab
-status: Draft
+status: In-Progress
 created: 2026-09-25
 updated: 2026-09-25
 updated_by: gjcourt
@@ -105,20 +105,20 @@ WebUI's and renovate-review's secrets — and give the new one to llmux only.
    llmux client key instead of the Anthropic key; netpols both ways.
 4. **cadence**, when it's deployed: `ANTHROPIC_BASE_URL` + an llmux client
    key in its manifests (coordinate with the `feat/cadence-app` branch).
-5. **Rotate the Anthropic key**; llmux is the only holder.
+5. **Rotate the Anthropic key**, after the end-to-end test; llmux is the
+   only holder.
 
 Later, and now simpler because everything is in one place: prompt caching,
 per-client budgets or rate limits.
 
-## Decisions for the owner
+## Decisions (owner, 2026-09-25)
 
-1. **Native pass-through** (proposed) vs translating through the domain.
-2. **Client keys required in production** (proposed: yes).
-3. **renovate-review's model.** It uses `claude-opus-4-8`, flagged earlier as
-   a legacy id. The move is a natural point to change it (e.g.
-   `claude-opus-5`) or keep it. llmux's model list must include whatever it
-   uses.
-4. **Rotate the Anthropic key** after the last move (proposed: yes).
+1. **Native pass-through** — yes.
+2. **Client keys required in production** — yes.
+3. **renovate-review's model** — upgrade to `claude-opus-5-5` (added to
+   llmux's model list in homelab#1471).
+4. **Rotate the Anthropic key** — yes, but only after an end-to-end test of
+   the whole path; not as part of the migration PRs.
 
 ## Out of scope
 
