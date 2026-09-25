@@ -23,7 +23,7 @@ Surveyed 2026-09-25 (every repo under `~/src`, plus the homelab manifests):
 | Caller | State | How it calls | Needs |
 |---|---|---|---|
 | Open WebUI | moving to llmux (homelab#1472) | OpenAI format, streaming | a client key (phase 1) |
-| **renovate-review** CronJob | running in the cluster | raw `POST https://api.anthropic.com/v1/messages`, text only, non-streaming, `REVIEW_MODEL=claude-opus-4-8` | Anthropic-format endpoint (phase 2) |
+| **renovate-review** CronJob | running in the cluster | raw `POST https://api.anthropic.com/v1/messages`, text only, non-streaming, `REVIEW_MODEL=claude-opus-4-8` (→ `claude-opus-5-5` on the move) | Anthropic-format endpoint (phase 2) |
 | cadence | being deployed (`homelab` branch `feat/cadence-app`) | `@anthropic-ai/sdk`, off unless `ANTHROPIC_API_KEY` is set | Anthropic-format endpoint |
 | yc-starter | not deployed | Python `anthropic` SDK, `claude-sonnet-5`, optional | Anthropic-format endpoint |
 | yc-prep | not deployed | commented-out stub | — |
