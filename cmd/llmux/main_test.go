@@ -156,3 +156,17 @@ func TestProvidersFromEnv_BadWebSearchMaxUses(t *testing.T) {
 		t.Errorf("0 disables search and must be accepted: %v", err)
 	}
 }
+
+func TestProvidersFromEnv_WebSearchStreamOnly(t *testing.T) {
+	t.Setenv("LLMUX_ANTHROPIC_API_KEY", "k")
+	for _, v := range []string{"true", "false", "1", "0"} {
+		t.Setenv("LLMUX_WEB_SEARCH_STREAM_ONLY", v)
+		if _, err := providersFromEnv(); err != nil {
+			t.Errorf("%q: %v", v, err)
+		}
+	}
+	t.Setenv("LLMUX_WEB_SEARCH_STREAM_ONLY", "sometimes")
+	if _, err := providersFromEnv(); err == nil {
+		t.Error("want an error for a non-boolean")
+	}
+}

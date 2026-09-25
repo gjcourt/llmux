@@ -97,7 +97,7 @@ Tool-calling models in vLLM/Ollama frequently return malformed JSON tool calls �
 
 | Service | Endpoint | Purpose |
 |---|---|---|
-| Anthropic | `LLMUX_ANTHROPIC_URL` (default `https://api.anthropic.com`) | Enabled by `LLMUX_ANTHROPIC_API_KEY`. `LLMUX_WEB_SEARCH_MAX_USES` (default 3; 0 = off) caps searches per request — a searched answer costs ~11–30k input tokens, and offering the tool at all adds ~2.2–2.8k to every request. `LLMUX_ANTHROPIC_MODELS` (default `claude-sonnet-5,claude-opus-5,claude-haiku-4-5`) is both the routing list and what `/v1/models` shows. `LLMUX_ANTHROPIC_MAX_TOKENS` (default 8192) applies when a request sets none |
+| Anthropic | `LLMUX_ANTHROPIC_URL` (default `https://api.anthropic.com`) | Enabled by `LLMUX_ANTHROPIC_API_KEY`. `LLMUX_WEB_SEARCH_MAX_USES` (default 3; 0 = off) caps searches per request — a searched answer costs ~11–30k input tokens, and offering the tool at all adds ~2.2–2.8k to a request. `LLMUX_WEB_SEARCH_STREAM_ONLY` (default `true`) offers it to streamed requests only: Open WebUI's background calls (titles, tags, follow-ups) are non-streamed and never need it. llmux can't tell who is asking, so **every** non-streaming client loses web search, silently — set it `false` if a non-streaming client needs search. `LLMUX_ANTHROPIC_MODELS` (default `claude-sonnet-5,claude-opus-5,claude-haiku-4-5`) is both the routing list and what `/v1/models` shows. `LLMUX_ANTHROPIC_MAX_TOKENS` (default 8192) applies when a request sets none |
 | vLLM | `LLMUX_VLLM_URL` (default empty = off) | Tool-capable local backend; was `http://10.42.2.10:8000` |
 | Ollama | `LLMUX_OLLAMA_URL` (default empty = off) | Local-model backend; was `http://10.42.2.10:30068/v1` |
 
