@@ -1,6 +1,7 @@
 package anthropic
 
 import (
+	"encoding/json"
 	"errors"
 	"io"
 	"os"
@@ -216,7 +217,7 @@ func TestParseStream_MalformedEvent(t *testing.T) {
 	}
 }
 
-// The captured web-search stream cites two sources, each once.
+// The captured web-search stream cites one source twice; it is reported once.
 func TestParseStream_Citations(t *testing.T) {
 	rec := parseFixture(t, "websearch.sse")
 	cites := rec.kinds(domain.EventCitation)
@@ -233,7 +234,9 @@ func TestParseStream_Citations(t *testing.T) {
 		}
 		seen[c.Citation.URL] = true
 	}
-	// Each citation arrives before the text it supports, and after Start.
+	if len(cites) != 1 {
+		t.Errorf("want 1 deduped citation, got %d", len(cites))
+	}
 	if rec.events[0].Kind != domain.EventStart {
 		t.Error("Start must come first")
 	}
@@ -338,5 +341,59 @@ func TestParseStream_CacheTokensFromMessageDelta(t *testing.T) {
 	}
 	if us := rec.kinds(domain.EventUsage); len(us) != 1 || us[0].Usage != (domain.Usage{PromptTokens: 100, CompletionTokens: 7, TotalTokens: 107}) {
 		t.Errorf("usage: %+v", us)
+	}
+}
+
+// On the real capture, every replayed block equals what the API sent, with
+// the deltas folded in: results and tool-use starts unchanged apart from the
+// rebuilt input, thinking keeping its signature, text keeping citations.
+func TestParseTurn_RealCaptureRoundTrip(t *testing.T) {
+	f, err := os.Open("testdata/websearch.sse")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	tr, err := newStreamState(0).parseTurn(f, &recorder{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tr.lossy {
+		t.Error("the real capture must not be lossy")
+	}
+	types := []string{}
+	for _, raw := range tr.blocks {
+		var b map[string]any
+		if err := json.Unmarshal(raw, &b); err != nil {
+			t.Fatal(err)
+		}
+		typ, _ := b["type"].(string)
+		types = append(types, typ)
+		switch typ {
+		case "thinking":
+			if sig, _ := b["signature"].(string); len(sig) < 100 {
+				t.Errorf("thinking lost its signature: %q", sig)
+			}
+		case "server_tool_use":
+			in, _ := b["input"].(map[string]any)
+			if q, _ := in["query"].(string); q == "" {
+				t.Errorf("tool input not rebuilt: %v", b["input"])
+			}
+		case "web_search_tool_result":
+			if c, _ := b["content"].([]any); len(c) == 0 {
+				t.Error("search results lost")
+			}
+		}
+	}
+	if len(types) != 11 || types[0] != "thinking" || types[1] != "server_tool_use" || types[2] != "web_search_tool_result" {
+		t.Errorf("block order: %v", types)
+	}
+	var cited int
+	for _, raw := range tr.blocks {
+		if strings.Contains(string(raw), "encrypted_index") {
+			cited++
+		}
+	}
+	if cited == 0 {
+		t.Error("text citations (with encrypted_index) must be kept for replay")
 	}
 }

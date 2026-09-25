@@ -241,10 +241,10 @@ func TestProvider_ContinuationCap(t *testing.T) {
 	}
 }
 
-// A failed resume happens mid-answer, so it must not be relayed as an HTTP
-// status (headers are already sent); it is an error the handler turns into
-// an in-stream error chunk.
-func TestProvider_FailedResumeIsMidStreamError(t *testing.T) {
+// A failed resume keeps the upstream error (status, Retry-After) wrapped, so
+// the inbound adapter can still relay it to a client that has received
+// nothing yet (JSON), and end a started stream with an error chunk.
+func TestProvider_FailedResumeKeepsUpstreamError(t *testing.T) {
 	calls := 0
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		calls++
@@ -253,6 +253,7 @@ func TestProvider_FailedResumeIsMidStreamError(t *testing.T) {
 			w.Write([]byte(pausedTurn("m"))) //nolint:errcheck
 			return
 		}
+		w.Header().Set("Retry-After", "7")
 		w.WriteHeader(http.StatusTooManyRequests)
 		w.Write([]byte(`{"type":"error","error":{"type":"rate_limit_error","message":"slow down"}}`)) //nolint:errcheck
 	}))
@@ -260,8 +261,103 @@ func TestProvider_FailedResumeIsMidStreamError(t *testing.T) {
 	p := New(Config{BaseURL: srv.URL, Models: []string{"claude-sonnet-5"}, WebSearchMaxUses: 3})
 	err := p.Chat(context.Background(), domain.ChatRequest{Model: "claude-sonnet-5", Messages: []domain.Message{user("q?")}}, &recorder{})
 	var ue *domain.UpstreamError
-	if err == nil || errors.As(err, &ue) {
-		t.Fatalf("want a plain mid-stream error, got %v", err)
+	if !errors.As(err, &ue) || ue.Status != 429 || ue.RetryAfter != "7" || !strings.Contains(err.Error(), "resuming paused turn") {
+		t.Fatalf("got %v", err)
+	}
+}
+
+// The client's max_tokens caps the whole answer across resumes.
+func TestProvider_ResumeSpendsMaxTokensBudget(t *testing.T) {
+	s := &scripted{bodies: []string{pausedTurn("m1"), finalTurn("done")}} // pausedTurn uses 5 output tokens
+	srv := httptest.NewServer(s.handler(t))
+	defer srv.Close()
+	p := New(Config{BaseURL: srv.URL, Models: []string{"claude-sonnet-5"}, WebSearchMaxUses: 3})
+	if err := p.Chat(context.Background(), domain.ChatRequest{Model: "claude-sonnet-5", MaxTokens: ptr(100), Messages: []domain.Message{user("q?")}}, &recorder{}); err != nil {
+		t.Fatal(err)
+	}
+	var second struct {
+		MaxTokens int `json:"max_tokens"`
+	}
+	json.Unmarshal(s.got[1], &second) //nolint:errcheck
+	if second.MaxTokens != 95 {
+		t.Errorf("resume max_tokens = %d, want 95", second.MaxTokens)
+	}
+
+	// Budget exhausted: no resume, answer ends as length.
+	s2 := &scripted{bodies: []string{pausedTurn("m1")}}
+	srv2 := httptest.NewServer(s2.handler(t))
+	defer srv2.Close()
+	p2 := New(Config{BaseURL: srv2.URL, Models: []string{"claude-sonnet-5"}, WebSearchMaxUses: 3})
+	rec := &recorder{}
+	if err := p2.Chat(context.Background(), domain.ChatRequest{Model: "claude-sonnet-5", MaxTokens: ptr(5), Messages: []domain.Message{user("q?")}}, rec); err != nil {
+		t.Fatal(err)
+	}
+	if len(s2.got) != 1 || rec.kinds(domain.EventFinish)[0].FinishReason != "length" {
+		t.Errorf("calls %d, events %+v", len(s2.got), rec.events)
+	}
+}
+
+// A turn whose blocks got a delta llmux can't fold in is not resumed: the
+// replayed copy could be incomplete.
+func TestProvider_LossyTurnNotResumed(t *testing.T) {
+	lossy := sse(
+		`{"type":"message_start","message":{"id":"m","model":"claude-sonnet-5","usage":{"input_tokens":1}}}`,
+		`{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`,
+		`{"type":"content_block_delta","index":0,"delta":{"type":"future_delta","stuff":"x"}}`,
+		`{"type":"message_delta","delta":{"stop_reason":"pause_turn"},"usage":{"output_tokens":1}}`, evStop)
+	s := &scripted{bodies: []string{lossy}}
+	srv := httptest.NewServer(s.handler(t))
+	defer srv.Close()
+	p := New(Config{BaseURL: srv.URL, Models: []string{"claude-sonnet-5"}, WebSearchMaxUses: 3})
+	rec := &recorder{}
+	if err := p.Chat(context.Background(), domain.ChatRequest{Model: "claude-sonnet-5", Messages: []domain.Message{user("q?")}}, rec); err != nil {
+		t.Fatal(err)
+	}
+	if len(s.got) != 1 || rec.kinds(domain.EventFinish)[0].FinishReason != "length" {
+		t.Errorf("calls %d, events %+v", len(s.got), rec.events)
+	}
+}
+
+// A source cited in two turns of one answer is reported once.
+func TestProvider_CitationsDedupedAcrossResumes(t *testing.T) {
+	cite := `{"type":"content_block_delta","index":0,"delta":{"type":"citations_delta","citation":{"type":"web_search_result_location","url":"https://same.example/","title":"S"}}}`
+	turn := func(stop string) string {
+		return sse(`{"type":"message_start","message":{"id":"m","model":"claude-sonnet-5","usage":{"input_tokens":1}}}`,
+			`{"type":"content_block_start","index":0,"content_block":{"citations":[],"type":"text","text":""}}`, cite,
+			`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"x"}}`,
+			`{"type":"message_delta","delta":{"stop_reason":"`+stop+`"},"usage":{"output_tokens":1}}`, evStop)
+	}
+	s := &scripted{bodies: []string{turn("pause_turn"), turn("end_turn")}}
+	srv := httptest.NewServer(s.handler(t))
+	defer srv.Close()
+	p := New(Config{BaseURL: srv.URL, Models: []string{"claude-sonnet-5"}, WebSearchMaxUses: 3})
+	rec := &recorder{}
+	if err := p.Chat(context.Background(), domain.ChatRequest{Model: "claude-sonnet-5", Messages: []domain.Message{user("q?")}}, rec); err != nil {
+		t.Fatal(err)
+	}
+	if n := len(rec.kinds(domain.EventCitation)); n != 1 || len(s.got) != 2 {
+		t.Errorf("citations %d, calls %d", n, len(s.got))
+	}
+}
+
+// Prefill extension through the whole Chat loop.
+func TestProvider_ResumeExtendsPrefill(t *testing.T) {
+	s := &scripted{bodies: []string{pausedTurn("m1"), finalTurn("done")}}
+	srv := httptest.NewServer(s.handler(t))
+	defer srv.Close()
+	p := New(Config{BaseURL: srv.URL, Models: []string{"claude-haiku-4-5"}, WebSearchMaxUses: 3})
+	req := domain.ChatRequest{Model: "claude-haiku-4-5", Messages: []domain.Message{user("q?"), {Role: "assistant", Content: "Sure:"}}}
+	if err := p.Chat(context.Background(), req, &recorder{}); err != nil {
+		t.Fatal(err)
+	}
+	var second struct {
+		Messages []struct {
+			Role string `json:"role"`
+		} `json:"messages"`
+	}
+	json.Unmarshal(s.got[1], &second) //nolint:errcheck
+	if len(second.Messages) != 2 || second.Messages[1].Role != "assistant" {
+		t.Errorf("want user + one assistant, got %s", s.got[1])
 	}
 }
 

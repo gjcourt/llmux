@@ -101,14 +101,24 @@ func (p *Provider) Chat(ctx context.Context, req domain.ChatRequest, sink domain
 		if err != nil {
 			return err
 		}
-		if t.stopReason != "pause_turn" || resumes == maxContinuations {
-			if t.stopReason == "pause_turn" {
-				slog.Warn("anthropic turn still paused after max continuations; answer may be incomplete", "model", req.Model, "continuations", resumes)
-			}
+		if t.stopReason != "pause_turn" {
 			return st.finish(sink, t.stopReason)
 		}
-		slog.Debug("resuming paused anthropic turn", "model", req.Model, "continuation", resumes+1)
-		body.withContinuation(t.blocks)
+		// The client's max_tokens caps the whole answer, not each request.
+		body.MaxTokens -= t.outputTokens
+		switch {
+		case resumes == maxContinuations:
+			slog.Warn("anthropic turn still paused after max continuations; answer may be incomplete", "model", req.Model, "continuations", resumes)
+		case t.lossy:
+			slog.Warn("not resuming paused anthropic turn: it had a delta type llmux cannot replay", "model", req.Model)
+		case body.MaxTokens <= 0:
+			slog.Debug("paused anthropic turn used the whole max_tokens budget", "model", req.Model)
+		default:
+			slog.Debug("resuming paused anthropic turn", "model", req.Model, "continuation", resumes+1)
+			body.withContinuation(t.blocks)
+			continue
+		}
+		return st.finish(sink, t.stopReason) // pause_turn → "length"
 	}
 }
 
@@ -150,11 +160,12 @@ func (p *Provider) send(ctx context.Context, body messagesRequest, st *streamSta
 			// would only fail to parse. Report the stall instead (502).
 			return turn{}, fmt.Errorf("anthropic returned HTTP %d, then its error body stalled: %w", resp.StatusCode, errIdle)
 		}
-		// Relayed verbatim only while nothing has been sent; a failed
-		// continuation is mid-answer, so it becomes an in-stream error.
 		ue := &domain.UpstreamError{Status: resp.StatusCode, ContentType: resp.Header.Get("Content-Type"), Body: raw, RetryAfter: resp.Header.Get("Retry-After")}
 		if st.started {
-			return turn{}, fmt.Errorf("resuming paused turn: HTTP %d: %s", ue.Status, ue.Body)
+			// A failed resume. Whether the client can still get this
+			// status is the inbound adapter's call: a JSON client has
+			// received nothing yet, a streaming one has.
+			return turn{}, fmt.Errorf("resuming paused turn: HTTP %d: %s: %w", ue.Status, ue.Body, ue)
 		}
 		return turn{}, ue
 	}

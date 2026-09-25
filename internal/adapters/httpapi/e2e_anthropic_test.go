@@ -266,3 +266,39 @@ func TestE2E_AnthropicMidStreamErrorChunk(t *testing.T) {
 		}
 	}
 }
+
+// A resume that fails with 429: a JSON client has received nothing, so it
+// gets the 429 and Retry-After; a streaming client gets an error chunk.
+func TestE2E_AnthropicFailedResume(t *testing.T) {
+	paused := "data: " + strings.Join([]string{
+		`{"type":"message_start","message":{"id":"m","model":"claude-sonnet-5","usage":{"input_tokens":1}}}`,
+		`{"type":"content_block_start","index":0,"content_block":{"type":"server_tool_use","id":"s","name":"web_search","input":{}}}`,
+		`{"type":"content_block_stop","index":0}`,
+		`{"type":"message_delta","delta":{"stop_reason":"pause_turn"},"usage":{"output_tokens":1}}`,
+		`{"type":"message_stop"}`,
+	}, "\n\ndata: ") + "\n\n"
+	newSrv := func() *httptest.Server {
+		calls := 0
+		return fakeAnthropic(t, func(w http.ResponseWriter, _ *http.Request) {
+			calls++
+			if calls%2 == 1 {
+				w.Header().Set("Content-Type", "text/event-stream")
+				w.Write([]byte(paused)) //nolint:errcheck
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("Retry-After", "7")
+			w.WriteHeader(http.StatusTooManyRequests)
+			w.Write([]byte(`{"type":"error","error":{"type":"rate_limit_error","message":"slow down"}}`)) //nolint:errcheck
+		})
+	}
+	resp, body := post(t, newSrv(), `{"model":"claude-sonnet-5","messages":[{"role":"user","content":"x"}]}`)
+	if resp.StatusCode != 429 || resp.Header.Get("Retry-After") != "7" || !strings.Contains(body, "slow down") {
+		t.Errorf("json: %d %q %s", resp.StatusCode, resp.Header.Get("Retry-After"), body)
+	}
+	resp, body = post(t, newSrv(), streamReq)
+	chunks, done := sseEvents(t, body)
+	if resp.StatusCode != 200 || !done || chunks[len(chunks)-1].Error == nil || !strings.Contains(chunks[len(chunks)-1].Error.Message, "slow down") {
+		t.Errorf("stream: %d %s", resp.StatusCode, body)
+	}
+}

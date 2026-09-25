@@ -104,8 +104,12 @@ func newStreamState(created int64) *streamState {
 // turn is one Messages API response: why it stopped, and its content blocks
 // as the API sent them, for resuming a paused turn.
 type turn struct {
-	stopReason string
-	blocks     []json.RawMessage
+	stopReason   string
+	blocks       []json.RawMessage
+	outputTokens int
+	// lossy is set when a block got a delta type llmux doesn't know, so its
+	// replayed copy may be incomplete and the turn must not be resumed.
+	lossy bool
 }
 
 // parseStream reads a single-turn stream and finishes the answer. It is the
@@ -145,6 +149,7 @@ func (st *streamState) parseTurn(r io.Reader, sink domain.EventSink) (turn, erro
 		blocks  = map[int]map[string]any{}
 		order   []int
 		partial = map[int]*strings.Builder{} // input_json_delta per block
+		lossy   bool
 		in, out apiUsage
 		stop    string
 	)
@@ -181,6 +186,7 @@ func (st *streamState) parseTurn(r io.Reader, sink domain.EventSink) (turn, erro
 				order = append(order, ev.Index)
 			}
 			blocks[ev.Index] = b
+			delete(partial, ev.Index)
 			if b["type"] == "text" {
 				if text, _ := b["text"].(string); text != "" {
 					if err := sink.Emit(domain.Event{Kind: domain.EventText, Text: text}); err != nil {
@@ -194,8 +200,12 @@ func (st *streamState) parseTurn(r io.Reader, sink domain.EventSink) (turn, erro
 			if b == nil || ev.Delta == nil {
 				continue
 			}
-			if err := st.applyDelta(b, ev, partial, sink); err != nil {
+			known, err := st.applyDelta(b, ev, partial, sink)
+			if err != nil {
 				return turn{}, err
+			}
+			if !known {
+				lossy = true
 			}
 
 		case "content_block_stop":
@@ -229,7 +239,7 @@ func (st *streamState) parseTurn(r io.Reader, sink domain.EventSink) (turn, erro
 			st.usage.PromptTokens += prompt
 			st.usage.CompletionTokens += out.OutputTokens
 			st.usage.TotalTokens += prompt + out.OutputTokens
-			t := turn{stopReason: stop}
+			t := turn{stopReason: stop, outputTokens: out.OutputTokens, lossy: lossy}
 			for _, i := range order {
 				raw, err := json.Marshal(blocks[i])
 				if err != nil {
@@ -265,14 +275,15 @@ func (st *streamState) parseTurn(r io.Reader, sink domain.EventSink) (turn, erro
 
 // applyDelta folds one content_block_delta into its block, so a paused turn
 // can be replayed, and emits what the client should see.
-func (st *streamState) applyDelta(b map[string]any, ev streamEvent, partial map[int]*strings.Builder, sink domain.EventSink) error {
+// It reports whether the delta type was known, i.e. fully folded in.
+func (st *streamState) applyDelta(b map[string]any, ev streamEvent, partial map[int]*strings.Builder, sink domain.EventSink) (bool, error) {
 	d := ev.Delta
 	switch d.Type {
 	case "text_delta":
 		text, _ := b["text"].(string)
 		b["text"] = text + d.Text
 		if b["type"] == "text" && d.Text != "" {
-			return sink.Emit(domain.Event{Kind: domain.EventText, Text: d.Text})
+			return true, sink.Emit(domain.Event{Kind: domain.EventText, Text: d.Text})
 		}
 	case "thinking_delta":
 		thinking, _ := b["thinking"].(string)
@@ -286,7 +297,7 @@ func (st *streamState) applyDelta(b map[string]any, ev streamEvent, partial map[
 		partial[ev.Index].WriteString(d.PartialJSON)
 	case "citations_delta":
 		if len(d.Citation) == 0 {
-			return nil
+			return true, nil
 		}
 		cites, _ := b["citations"].([]any)
 		b["citations"] = append(cites, d.Citation)
@@ -296,10 +307,11 @@ func (st *streamState) applyDelta(b map[string]any, ev streamEvent, partial map[
 		}
 		if json.Unmarshal(d.Citation, &c) == nil && c.URL != "" && !st.cited[c.URL] {
 			st.cited[c.URL] = true
-			return sink.Emit(domain.Event{Kind: domain.EventCitation, Citation: domain.Citation{URL: c.URL, Title: c.Title}})
+			return true, sink.Emit(domain.Event{Kind: domain.EventCitation, Citation: domain.Citation{URL: c.URL, Title: c.Title}})
 		}
 	default:
 		slog.Debug("ignoring anthropic delta", "type", d.Type)
+		return false, nil
 	}
-	return nil
+	return true, nil
 }
