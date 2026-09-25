@@ -73,9 +73,17 @@ func (r *messagesRequest) withContinuation(blocks []json.RawMessage) {
 //
 // maxSearches > 0 offers the model the web search tool, capped at that many
 // searches per request; 0 leaves it off.
-func buildRequest(req domain.ChatRequest, defaultMaxTokens, maxSearches int) (messagesRequest, error) {
+//
+// dropTools handles client tools llmux can't yet forward: instead of a 400,
+// the tool definitions are ignored and tool traffic in the history (tool
+// calls, tool results) is removed, keeping any text. Open WebUI sends its
+// built-in tools on every browser chat, so rejecting them fails every chat.
+func buildRequest(req domain.ChatRequest, defaultMaxTokens, maxSearches int, dropTools bool) (messagesRequest, error) {
 	if len(req.Tools) > 0 {
-		return messagesRequest{}, &domain.InvalidRequestError{Msg: "tools are not supported for Anthropic models in llmux yet"}
+		if !dropTools {
+			return messagesRequest{}, &domain.InvalidRequestError{Msg: "tools are not supported for Anthropic models in llmux yet"}
+		}
+		slog.Debug("ignoring client tools: not yet forwarded to Anthropic", "model", req.Model, "tools", len(req.Tools))
 	}
 	if req.Temperature != nil || req.TopP != nil {
 		slog.Debug("dropping temperature/top_p: rejected by Claude 5 models", "model", req.Model)
@@ -100,17 +108,30 @@ func buildRequest(req domain.ChatRequest, defaultMaxTokens, maxSearches int) (me
 				system = append(system, m.Content)
 			}
 		case "user", "assistant":
-			if len(m.ToolCalls) > 0 {
+			if len(m.ToolCalls) > 0 && !dropTools {
 				return messagesRequest{}, &domain.InvalidRequestError{Msg: "tool calls in history are not supported for Anthropic models in llmux yet"}
 			}
 			if strings.TrimSpace(m.Content) == "" {
 				if m.Role == "assistant" {
-					continue // an empty assistant turn carries nothing
+					continue // an empty assistant turn (or one that was only tool calls) carries nothing
 				}
 				return messagesRequest{}, &domain.InvalidRequestError{Msg: "message " + strconv.Itoa(i) + " is empty"}
 			}
+			// Dropping tool traffic can leave two assistant turns adjacent
+			// (text, [tool call + result removed], text); merge them rather
+			// than rely on the API accepting it. Adjacent user turns are
+			// accepted (measured) and left alone.
+			if n := len(out.Messages); dropTools && m.Role == "assistant" && n > 0 && out.Messages[n-1].Role == "assistant" {
+				if prev, ok := out.Messages[n-1].Content.(string); ok {
+					out.Messages[n-1].Content = prev + "\n\n" + m.Content
+					continue
+				}
+			}
 			out.Messages = append(out.Messages, message{Role: m.Role, Content: m.Content})
 		case "tool":
+			if dropTools {
+				continue
+			}
 			return messagesRequest{}, &domain.InvalidRequestError{Msg: "tool results are not supported for Anthropic models in llmux yet"}
 		default:
 			return messagesRequest{}, &domain.InvalidRequestError{Msg: "unsupported message role " + m.Role}

@@ -55,7 +55,7 @@ server-tool blocks are dropped, and **nothing it emits is ever a tool call**
 (`pause_turn`) is resumed with its blocks sent back verbatim, up to 3 times,
 into the same response. It always drops `temperature`/`top_p` (the Claude 5 family 400s
 on either) and rejects client tools, tool history and images with a 400
-rather than silently dropping them. Its HTTP client must never follow
+rather than silently dropping them. Exception: `LLMUX_CLIENT_TOOLS=drop` (default `reject`) ignores client tools and removes tool traffic from the history instead — **required for Open WebUI**, which sends its built-in tools (time, memory, knowledge, chat search) on every browser chat. Those tools then do nothing until llmux forwards tools properly. Its HTTP client must never follow
 redirects (`anthropic.HTTPClient`): `x-api-key` survives a cross-host redirect.
 
 The vLLM/Ollama provider keeps the original behaviour: requests with tools go to

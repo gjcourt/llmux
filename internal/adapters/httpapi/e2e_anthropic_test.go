@@ -350,3 +350,44 @@ func TestE2E_AnthropicPartialUsageNotOnWire(t *testing.T) {
 		t.Errorf("want the error chunk last: %s", body)
 	}
 }
+
+// The request that broke Open WebUI at cutover: a browser chat carrying
+// Open WebUI's built-in tools. With drop mode it gets an answer.
+func TestE2E_AnthropicDropsOpenWebUIBuiltinTools(t *testing.T) {
+	sse, err := os.ReadFile("../anthropic/testdata/plain.sse")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var upstream []byte
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		upstream, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Write(sse) //nolint:errcheck
+	}))
+	t.Cleanup(up.Close)
+	p := anthropic.New(anthropic.Config{APIKey: "k", BaseURL: up.URL, Models: []string{"claude-sonnet-5"}, WebSearchMaxUses: 3, DropClientTools: true})
+	srv := httptest.NewServer(httpapi.New(app.New(p)))
+	t.Cleanup(srv.Close)
+	body := `{"model":"claude-sonnet-5","stream":true,"messages":[{"role":"user","content":"help me think of gifts for my son; he loves trucks"}],
+		"tools":[{"type":"function","function":{"name":"get_current_timestamp","description":"Get the current time","parameters":{"type":"object","properties":{}}}},
+		         {"type":"function","function":{"name":"search_memories","parameters":{"type":"object","properties":{"query":{"type":"string"}}}}}]}`
+	resp, out := post(t, srv, body)
+	chunks, done := sseEvents(t, out)
+	var text string
+	for _, c := range chunks {
+		if c.Error != nil {
+			t.Fatalf("error chunk: %s", out)
+		}
+		for _, ch := range c.Choices {
+			if ch.Delta.Content != nil {
+				text += *ch.Delta.Content
+			}
+		}
+	}
+	if resp.StatusCode != 200 || !done || text != "Red and blue." {
+		t.Fatalf("status %d, text %q: %s", resp.StatusCode, text, out)
+	}
+	if strings.Contains(string(upstream), "get_current_timestamp") || !strings.Contains(string(upstream), "web_search_20250305") {
+		t.Errorf("upstream must carry llmux's web search and none of the client's tools: %s", upstream)
+	}
+}

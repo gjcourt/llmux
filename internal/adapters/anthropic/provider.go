@@ -43,9 +43,14 @@ type Config struct {
 	// non-streamed (v0.11.3: 'stream': False in routers/tasks.py) and never
 	// need it; its chat replies stream.
 	WebSearchStreamOnly bool
-	Client              *http.Client     // default HTTPClient()
-	IdleTimeout         time.Duration    // cancel after this long with no bytes; default 90s
-	Now                 func() time.Time // for tests
+	// DropClientTools ignores client-supplied tools (and tool traffic in the
+	// history) instead of rejecting the request, until llmux can forward
+	// them. Needed for Open WebUI, which sends its built-in tools on every
+	// browser chat.
+	DropClientTools bool
+	Client          *http.Client     // default HTTPClient()
+	IdleTimeout     time.Duration    // cancel after this long with no bytes; default 90s
+	Now             func() time.Time // for tests
 }
 
 // Provider implements outbound.ChatProvider for Anthropic.
@@ -104,7 +109,7 @@ func (p *Provider) Chat(ctx context.Context, req domain.ChatRequest, sink domain
 		slog.Debug("web search not offered: non-streamed request and LLMUX_WEB_SEARCH_STREAM_ONLY is on", "model", req.Model)
 		searches = 0
 	}
-	body, err := buildRequest(req, p.cfg.DefaultMaxTokens, searches)
+	body, err := buildRequest(req, p.cfg.DefaultMaxTokens, searches, p.cfg.DropClientTools)
 	if err != nil {
 		return err
 	}
