@@ -20,7 +20,22 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
-      - run: go build .
+      - run: go build ./... && go build -o llmux ./cmd/llmux
+
+  # ── Architecture guard ──────────────────────────────────────────────────────
+  arch:
+    name: Arch guard
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Install go-arch-lint
+        run: go install github.com/fe3dback/go-arch-lint@v1.18.0
+      - name: Check hexagonal boundaries
+        run: go-arch-lint check
 
   # ── Test ───────────────────────────────────────────────────────────────────
   test:
