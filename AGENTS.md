@@ -1,6 +1,6 @@
 # AGENTS.md
 
-> llmux is an OpenAI-compatible HTTP proxy that routes chat requests to model backends. Today's backend is vLLM/Ollama, where it repairs malformed tool calls and strips `<think>` blocks; an Anthropic backend with web search is planned (docs/plans/2026-09-25-hexagonal-anthropic-port.md). — https://github.com/gjcourt/llmux
+> llmux is an OpenAI-compatible HTTP proxy that routes chat requests to model backends. Backends: Anthropic (native Messages API; web search planned, docs/plans/2026-09-25-hexagonal-anthropic-port.md) and vLLM/Ollama, where it repairs malformed tool calls and strips `<think>` blocks. — https://github.com/gjcourt/llmux
 
 ## Commands
 
@@ -26,6 +26,7 @@ internal/ports/inbound/         ChatService
 internal/ports/outbound/        ChatProvider
 internal/app/                   routes a request to the first provider that Handles(model)
 internal/adapters/httpapi/      inbound: OpenAI-compatible /v1/chat/completions, /v1/models, /healthz
+internal/adapters/anthropic/    outbound: Anthropic Messages API (text only in v1)
 internal/adapters/openaicompat/ outbound: vLLM + Ollama, failover, tool-call transform
 internal/testdoubles/           scripted fake ChatProvider
 ```
@@ -38,6 +39,19 @@ anything before it knows it can answer — an error returned before the first
 event (e.g. `*domain.UpstreamError`) becomes a clean HTTP status; one after it
 becomes an in-stream error chunk.
 
+**Provider order is routing.** `app` sends a request to the first provider
+whose `Handles(model)` is true. Anthropic handles only its configured model
+list; openaicompat handles everything, so it must be registered last
+(`providersFromEnv`, pinned by a test).
+
+The Anthropic provider always streams upstream, even for a non-streaming
+client, and relays only text blocks: thinking and server-tool blocks are
+dropped, and nothing it emits is ever a tool call — Open WebUI would try to
+execute it. It always drops `temperature`/`top_p` (the Claude 5 family 400s
+on either) and rejects client tools, tool history and images with a 400
+rather than silently dropping them. Its HTTP client must never follow
+redirects (`anthropic.HTTPClient`): `x-api-key` survives a cross-host redirect.
+
 The vLLM/Ollama provider keeps the original behaviour: requests with tools go to
 vLLM, falling back to Ollama through `applyToolCallTransform`; plain chat goes to
 Ollama, falling back to vLLM. When tools are present but the model returns empty
@@ -49,7 +63,7 @@ Full description: [Architecture Overview](docs/architecture/2026-07-25-overview.
 
 - **Hexagonal layout**: dependencies point inward. `domain` imports nothing internal; ports import only `domain`; adapters never import each other. `go-arch-lint check` enforces this in CI.
 - **Transform stages are pure** — no I/O, no globals; they take bytes in and return bytes out.
-- **Empty env var disables that backend** — `LLMUX_VLLM_URL=` (set, but empty) turns vLLM off; an *unset* variable takes the default. `envOr` uses `os.LookupEnv`. (Before 2026-09-25 this line was documented but false — the old getter treated empty as unset.)
+- **Backends are off unless configured.** Anthropic needs `LLMUX_ANTHROPIC_API_KEY`; vLLM/Ollama default to empty (off) since 2026-09-25, when the homelab GPUs were sold. An empty value disables a backend; `envOr` uses `os.LookupEnv`.
 - **Conventional Commits** for every commit (`feat:`, `fix:`, `chore:`, `refactor:`, `docs:`, `test:`, `ci:`).
 - **Branch names** follow `<type>/<description>`.
 - **All changes go through a branch and pull request** — never commit directly to the default branch (`master`); it is protected.
@@ -77,10 +91,9 @@ Tool-calling models in vLLM/Ollama frequently return malformed JSON tool calls �
 
 | Service | Endpoint | Purpose |
 |---|---|---|
-| vLLM | `LLMUX_VLLM_URL` (default `http://10.42.2.10:8000`) | Primary inference backend (TrueNAS) |
-| Ollama | `LLMUX_OLLAMA_URL` (default `http://10.42.2.10:30068/v1`) | Fallback / local-model backend |
-
-Set either to empty string to disable that backend.
+| Anthropic | `LLMUX_ANTHROPIC_URL` (default `https://api.anthropic.com`) | Enabled by `LLMUX_ANTHROPIC_API_KEY`. `LLMUX_ANTHROPIC_MODELS` (default `claude-sonnet-5,claude-opus-5,claude-haiku-4-5`) is both the routing list and what `/v1/models` shows. `LLMUX_ANTHROPIC_MAX_TOKENS` (default 8192) applies when a request sets none |
+| vLLM | `LLMUX_VLLM_URL` (default empty = off) | Tool-capable local backend; was `http://10.42.2.10:8000` |
+| Ollama | `LLMUX_OLLAMA_URL` (default empty = off) | Local-model backend; was `http://10.42.2.10:30068/v1` |
 
 ## Quality gate before push
 

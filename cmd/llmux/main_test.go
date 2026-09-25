@@ -78,3 +78,67 @@ func TestServe_DrainsInFlightRequest(t *testing.T) {
 		t.Errorf("serve: %v", err)
 	}
 }
+
+func providerNames(t *testing.T) []string {
+	t.Helper()
+	ps, err := providersFromEnv()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, p := range ps {
+		names = append(names, p.Name())
+	}
+	return names
+}
+
+// The first provider that Handles a model wins, and openaicompat handles
+// every model. Anthropic must therefore come first, or claude-* requests
+// would be sent to Ollama.
+func TestProvidersFromEnv_AnthropicBeforeCatchAll(t *testing.T) {
+	t.Setenv("LLMUX_ANTHROPIC_API_KEY", "k")
+	t.Setenv("LLMUX_OLLAMA_URL", "http://ollama")
+	ps, err := providersFromEnv()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ps) != 2 || ps[0].Name() != "anthropic" || ps[1].Name() != "openaicompat" {
+		t.Fatalf("order: %v", providerNames(t))
+	}
+	if !ps[0].Handles("claude-sonnet-5") || ps[0].Handles("qwen3") || !ps[1].Handles("qwen3") {
+		t.Error("routing sets wrong")
+	}
+}
+
+func TestProvidersFromEnv_Defaults(t *testing.T) {
+	t.Setenv("LLMUX_ANTHROPIC_API_KEY", "")
+	if names := providerNames(t); len(names) != 0 {
+		t.Errorf("no key and no backend URLs must configure nothing, got %v", names)
+	}
+	t.Setenv("LLMUX_ANTHROPIC_API_KEY", "k")
+	if names := providerNames(t); len(names) != 1 || names[0] != "anthropic" {
+		t.Errorf("got %v", names)
+	}
+}
+
+func TestProvidersFromEnv_ModelList(t *testing.T) {
+	t.Setenv("LLMUX_ANTHROPIC_API_KEY", "k")
+	t.Setenv("LLMUX_ANTHROPIC_MODELS", " claude-opus-5 ,, claude-haiku-4-5 ")
+	ps, err := providersFromEnv()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ps[0].Handles("claude-opus-5") || !ps[0].Handles("claude-haiku-4-5") || ps[0].Handles("claude-sonnet-5") || ps[0].Handles("") {
+		t.Error("model list not parsed as trimmed, non-empty entries")
+	}
+}
+
+func TestProvidersFromEnv_BadMaxTokens(t *testing.T) {
+	t.Setenv("LLMUX_ANTHROPIC_API_KEY", "k")
+	for _, v := range []string{"0", "-5", "lots"} {
+		t.Setenv("LLMUX_ANTHROPIC_MAX_TOKENS", v)
+		if _, err := providersFromEnv(); err == nil {
+			t.Errorf("%q: want error", v)
+		}
+	}
+}

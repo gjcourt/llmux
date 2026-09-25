@@ -84,17 +84,24 @@ func (h *Handler) chat(w http.ResponseWriter, r *http.Request) {
 }
 
 // writeChatError maps a service error to an HTTP response. An upstream's own
-// error response is relayed with its original status and body.
+// error response is relayed with its body and, mostly, its status; see
+// clientStatus.
 func writeChatError(w http.ResponseWriter, err error) {
 	var ue *domain.UpstreamError
+	var ie *domain.InvalidRequestError
 	switch {
+	case errors.As(err, &ie):
+		writeError(w, http.StatusBadRequest, ie.Msg)
 	case errors.As(err, &ue):
 		ct := ue.ContentType
 		if ct == "" {
 			ct = "application/json"
 		}
 		w.Header().Set("Content-Type", ct)
-		w.WriteHeader(ue.Status)
+		if ue.RetryAfter != "" {
+			w.Header().Set("Retry-After", ue.RetryAfter)
+		}
+		w.WriteHeader(clientStatus(ue.Status))
 		w.Write(ue.Body) //nolint:errcheck
 	case errors.Is(err, domain.ErrNoProvider):
 		writeError(w, http.StatusNotFound, err.Error())
@@ -106,6 +113,28 @@ func writeChatError(w http.ResponseWriter, err error) {
 		slog.Error("chat failed", "err", err)
 		writeError(w, http.StatusBadGateway, err.Error())
 	}
+}
+
+// clientStatus is the status a client sees for an upstream's. Redirects and
+// auth failures are llmux's own configuration, not the client's, so they
+// become 502 — an auth failure must not tell the client to re-authenticate.
+// Anthropic's non-standard 529 (overloaded) becomes 503, which clients know
+// to retry.
+func clientStatus(upstream int) int {
+	if upstream >= 300 && upstream < 400 {
+		// A 3xx reaches here only when a provider didn't follow it (the
+		// Anthropic client never does; see anthropic.HTTPClient). A bare 3xx
+		// without its Location means nothing to the client.
+		slog.Warn("upstream redirected; check the backend base URL", "status", upstream)
+		return http.StatusBadGateway
+	}
+	switch upstream {
+	case http.StatusUnauthorized, http.StatusForbidden:
+		return http.StatusBadGateway
+	case 529:
+		return http.StatusServiceUnavailable
+	}
+	return upstream
 }
 
 func writeError(w http.ResponseWriter, status int, msg string) {

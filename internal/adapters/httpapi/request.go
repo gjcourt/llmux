@@ -73,7 +73,8 @@ func parseRequest(body []byte) (domain.ChatRequest, error) {
 	req.Stop = parseStop(w.Stop)
 
 	for _, m := range w.Messages {
-		dm := domain.Message{Role: m.Role, Content: messageText(m.Content), ToolCallID: m.ToolCallID}
+		text, nonText := messageText(m.Content)
+		dm := domain.Message{Role: m.Role, Content: text, NonText: nonText, ToolCallID: m.ToolCallID}
 		for _, tc := range m.ToolCalls {
 			dm.ToolCalls = append(dm.ToolCalls, domain.ToolCall{ID: tc.ID, Name: tc.Function.Name, Arguments: argumentsText(tc.Function.Arguments)})
 		}
@@ -83,31 +84,33 @@ func parseRequest(body []byte) (domain.ChatRequest, error) {
 }
 
 // messageText flattens OpenAI message content — a string, null, or an array of
-// parts — into its text. Non-text parts (images, audio) are skipped here; they
-// survive in ChatRequest.Raw for providers that forward the original body.
-// Any other shape yields "".
-func messageText(raw json.RawMessage) string {
+// parts — into its text. Non-text parts (images, audio) are skipped and
+// reported as nonText; they survive in ChatRequest.Raw for providers that
+// forward the original body. Any other shape yields "".
+func messageText(raw json.RawMessage) (text string, nonText bool) {
 	if len(raw) == 0 || string(raw) == "null" {
-		return ""
+		return "", false
 	}
 	var s string
 	if err := json.Unmarshal(raw, &s); err == nil {
-		return s
+		return s, false
 	}
 	var parts []struct {
 		Type string `json:"type"`
 		Text string `json:"text"`
 	}
 	if err := json.Unmarshal(raw, &parts); err != nil {
-		return ""
+		return "", false
 	}
 	var b strings.Builder
 	for _, p := range parts {
 		if p.Type == "text" {
 			b.WriteString(p.Text)
+		} else {
+			nonText = true
 		}
 	}
-	return b.String()
+	return b.String(), nonText
 }
 
 // argumentsText returns tool-call arguments as a JSON string, whether the
