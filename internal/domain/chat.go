@@ -146,8 +146,10 @@ type InvalidRequestError struct {
 
 func (e *InvalidRequestError) Error() string { return e.Msg }
 
-// UpstreamError is a non-success response from an upstream, returned before any
-// event was emitted so the inbound adapter can relay its status and body.
+// UpstreamError is a non-success response from an upstream. It may be
+// returned (or wrapped) after events were emitted; the inbound adapter relays
+// its status and body only if it has not written anything to the client yet,
+// and otherwise reports the error in-stream.
 type UpstreamError struct {
 	Status      int
 	ContentType string
