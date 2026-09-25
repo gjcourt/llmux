@@ -1,0 +1,6 @@
+.git
+.github
+.worktrees
+docs
+llmux
+*.md
