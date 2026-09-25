@@ -74,7 +74,10 @@ func run() error {
 		// vLLM/Ollama serve whatever id they're sent, so theirs can't be.
 		for _, p := range providers {
 			if p.Name() == "anthropic" {
-				ms, _ := p.Models(ctx)
+				ms, err := p.Models(ctx)
+				if err != nil {
+					slog.Warn("could not list models to pre-create their metric series", "provider", p.Name(), "err", err)
+				}
 				ids := make([]string, 0, len(ms))
 				for _, m := range ms {
 					ids = append(ids, m.ID)

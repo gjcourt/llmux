@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
 
 	"github.com/gjcourt/llmux/internal/domain"
@@ -126,5 +127,37 @@ func TestMetrics_DurationOnlyForOK(t *testing.T) {
 	m.ChatFinished(outbound.ChatObservation{Provider: "p", Model: "m", Outcome: outbound.OutcomeUpstream5xx, Duration: time.Second})
 	if n := testutil.CollectAndCount(m.duration); n != 0 {
 		t.Errorf("a failed request created %d duration series", n)
+	}
+}
+
+// Declare must use exactly the label values ChatFinished uses: real traffic
+// on a declared model adds no series (a mismatch would leave zero series
+// that never move, next to live ones that were born at 1).
+func TestMetrics_DeclareMatchesTraffic(t *testing.T) {
+	m := New()
+	m.Declare("anthropic", []string{"a"})
+	count := func() int {
+		n := 0
+		for _, c := range []prometheus.Collector{m.requests, m.inFlight, m.tokens, m.searches, m.citations, m.finishes, m.noUsage} {
+			n += testutil.CollectAndCount(c)
+		}
+		return n
+	}
+	before := count()
+	outcomes := []outbound.Outcome{outbound.OutcomeOK, outbound.OutcomeInvalidRequest, outbound.OutcomeUpstream4xx, outbound.OutcomeUpstream5xx, outbound.OutcomeUnavailable, outbound.OutcomeCanceled, outbound.OutcomeError}
+	for _, stream := range []bool{true, false} {
+		for _, o := range outcomes {
+			for _, fr := range []string{"stop", "length", "content_filter"} {
+				m.ChatStarted("anthropic", "a")
+				m.ChatFinished(outbound.ChatObservation{Provider: "anthropic", Model: "a", Stream: stream, Outcome: o, FinishReason: fr,
+					Duration: time.Second, TimeToFirstToken: time.Millisecond, Citations: 1,
+					Usage: &domain.Usage{PromptTokens: 10, CompletionTokens: 1, CacheReadTokens: 2, CacheWriteTokens: 1, WebSearches: 1}})
+			}
+		}
+		m.ChatStarted("anthropic", "a")
+		m.ChatFinished(outbound.ChatObservation{Provider: "anthropic", Model: "a", Stream: stream, Outcome: outbound.OutcomeOK})
+	}
+	if after := count(); after != before {
+		t.Errorf("traffic added %d series beyond the declared ones", after-before)
 	}
 }

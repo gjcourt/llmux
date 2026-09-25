@@ -59,7 +59,7 @@ func New() *Metrics {
 	}, []string{"provider", "model", "stream"})
 	m.ttft = prometheus.NewHistogramVec(prometheus.HistogramOpts{
 		Name:    "llmux_chat_time_to_first_token_seconds",
-		Help:    "Time from request to the first text or tool-call token. Web search happens before the first token. For a non-streamed vLLM/Ollama answer it is the whole answer's time.",
+		Help:    "Time from request to the first text or tool-call token, whatever the outcome (a cancelled answer that got a token counts). Web search happens before the first token. For a non-streamed vLLM/Ollama answer it is the whole answer's time.",
 		Buckets: []float64{0.1, 0.25, 0.5, 1, 2, 4, 8, 15, 30, 60},
 	}, []string{"provider", "model", "stream"})
 	m.tokens = prometheus.NewCounterVec(prometheus.CounterOpts{
