@@ -349,3 +349,36 @@ func TestRelaySSE_ErrorChunk(t *testing.T) {
 		t.Errorf("text before the error should still be relayed, got %q", rec.text())
 	}
 }
+
+// Critique pass 2: a truncated tool call must not be reported as a finished
+// one. A plain stop still becomes tool_calls.
+func TestEmitMessage_ToolCallFinishReason(t *testing.T) {
+	for upstream, want := range map[string]string{"length": "length", "stop": "tool_calls", "": "tool_calls", "tool_calls": "tool_calls"} {
+		content := ""
+		resp := openAIResponse{Choices: []openAIChoice{{
+			Message:      openAIMsg{Role: "assistant", Content: &content, ToolCalls: []openAIToolCall{{ID: "c", Type: "function", Function: openAIToolFunction{Name: "f", Arguments: `{"q":`}}}},
+			FinishReason: upstream,
+		}}}
+		rec := &recorder{}
+		if err := emitMessage(resp, rec); err != nil {
+			t.Fatal(err)
+		}
+		if got := rec.finish(); got != want {
+			t.Errorf("upstream %q: finish = %q, want %q", upstream, got, want)
+		}
+	}
+}
+
+// Critique pass 2: a stream that stops without [DONE] was cut off, and must
+// surface as an error rather than a clean finish.
+func TestRelaySSE_TruncatedIsError(t *testing.T) {
+	stream := `data: {"id":"c","model":"m","choices":[{"delta":{"content":"hal"}}]}` + "\n\n"
+	rec := &recorder{}
+	err := relaySSE(strings.NewReader(stream), rec)
+	if !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Fatalf("want ErrUnexpectedEOF, got %v", err)
+	}
+	if rec.text() != "hal" {
+		t.Errorf("text before the cut must still be relayed, got %q", rec.text())
+	}
+}

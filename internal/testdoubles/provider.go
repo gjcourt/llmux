@@ -4,6 +4,7 @@ package testdoubles
 import (
 	"context"
 	"slices"
+	"sync"
 
 	"github.com/gjcourt/llmux/internal/domain"
 	"github.com/gjcourt/llmux/internal/ports/outbound"
@@ -18,7 +19,8 @@ type Provider struct {
 	Err          error
 	ModelsErr    error
 
-	Requests []domain.ChatRequest
+	mu       sync.Mutex
+	Requests []domain.ChatRequest // read only after the requests have finished
 }
 
 var _ outbound.ChatProvider = (*Provider)(nil)
@@ -41,7 +43,9 @@ func (p *Provider) Handles(model string) bool {
 
 // Chat implements outbound.ChatProvider.
 func (p *Provider) Chat(_ context.Context, req domain.ChatRequest, sink domain.EventSink) error {
+	p.mu.Lock()
 	p.Requests = append(p.Requests, req)
+	p.mu.Unlock()
 	for _, e := range p.Events {
 		if err := sink.Emit(e); err != nil {
 			return err

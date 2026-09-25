@@ -196,7 +196,8 @@ func upstreamError(resp *http.Response) error {
 // emitMessage replays a complete (non-streamed) response as events, in the
 // same order the original writeAsSSE produced SSE chunks: role, then either the
 // tool calls (name, then arguments, per call) or the text, then the finish
-// reason.
+// reason. Fields the domain does not model — reasoning_content among them —
+// are dropped.
 func emitMessage(resp openAIResponse, sink domain.EventSink) error {
 	if len(resp.Choices) == 0 {
 		return nil
@@ -216,7 +217,13 @@ func emitMessage(resp openAIResponse, sink domain.EventSink) error {
 				domain.Event{Kind: domain.EventToolCall, ToolCall: domain.ToolCallDelta{Index: i, ArgumentsDelta: tc.Function.Arguments}},
 			)
 		}
-		events = append(events, domain.Event{Kind: domain.EventFinish, FinishReason: "tool_calls"})
+		// Keep a finish reason that says something ("length": the arguments
+		// may be cut off), but report a plain stop as tool_calls.
+		fr := c.FinishReason
+		if fr == "" || fr == "stop" {
+			fr = "tool_calls"
+		}
+		events = append(events, domain.Event{Kind: domain.EventFinish, FinishReason: fr})
 	} else {
 		if c.Message.Content != nil && *c.Message.Content != "" {
 			events = append(events, domain.Event{Kind: domain.EventText, Text: *c.Message.Content})
@@ -326,10 +333,15 @@ func relaySSE(r io.Reader, sink domain.EventSink) error {
 			}
 		}
 	}
-	if err := sc.Err(); err != nil && !errors.Is(err, context.Canceled) {
+	if err := sc.Err(); err != nil {
+		if errors.Is(err, context.Canceled) {
+			return nil
+		}
 		return fmt.Errorf("read upstream stream: %w", err)
 	}
-	return nil
+	// vLLM and Ollama always end with [DONE]. A stream that stops without it
+	// was cut off; report that rather than finishing it as if complete.
+	return fmt.Errorf("upstream stream ended without [DONE]: %w", io.ErrUnexpectedEOF)
 }
 
 func parseUsage(raw json.RawMessage) (domain.Usage, bool) {
