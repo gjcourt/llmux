@@ -1,7 +1,7 @@
 // Package anthropic is the outbound adapter for Anthropic's native Messages
 // API. It is used instead of Anthropic's OpenAI-compatible endpoint because
-// only the native API exposes server tools such as web search (added in a
-// later phase) — the compat endpoint silently ignores web_search_options.
+// only the native API exposes server tools such as web search — the compat
+// endpoint silently ignores web_search_options.
 package anthropic
 
 import (
@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
 	"slices"
@@ -24,12 +25,18 @@ import (
 // APIVersion is the anthropic-version header llmux speaks.
 const APIVersion = "2023-06-01"
 
+// maxContinuations bounds how many times a paused server-tool turn is resumed
+// within one answer. Each resume re-sends the whole conversation, search
+// results included, so each costs a full request's input tokens.
+const maxContinuations = 3
+
 // Config configures the provider.
 type Config struct {
 	APIKey           string
 	BaseURL          string           // default https://api.anthropic.com
 	Models           []string         // model ids this provider serves and lists
 	DefaultMaxTokens int              // used when the request sets none; Anthropic requires one
+	WebSearchMaxUses int              // searches allowed per request; 0 disables web search
 	Client           *http.Client     // default HTTPClient()
 	IdleTimeout      time.Duration    // cancel after this long with no bytes; default 90s
 	Now              func() time.Time // for tests
@@ -80,22 +87,43 @@ func (p *Provider) Models(context.Context) ([]domain.Model, error) {
 
 // Chat implements outbound.ChatProvider. The upstream call always streams;
 // the inbound adapter assembles a single JSON response when the client asked
-// for one.
+// for one. A turn that pauses mid-search (stop_reason pause_turn) is resumed
+// with a follow-up request, up to maxContinuations times, and streams on into
+// the same response.
 func (p *Provider) Chat(ctx context.Context, req domain.ChatRequest, sink domain.EventSink) error {
-	ctx, cancel := context.WithCancelCause(ctx)
-	defer cancel(nil)
-	body, err := buildRequest(req, p.cfg.DefaultMaxTokens)
+	body, err := buildRequest(req, p.cfg.DefaultMaxTokens, p.cfg.WebSearchMaxUses)
 	if err != nil {
 		return err
 	}
+	st := newStreamState(p.cfg.Now().Unix())
+	for resumes := 0; ; resumes++ {
+		t, err := p.send(ctx, body, st, sink)
+		if err != nil {
+			return err
+		}
+		if t.stopReason != "pause_turn" || resumes == maxContinuations {
+			if t.stopReason == "pause_turn" {
+				slog.Warn("anthropic turn still paused after max continuations; answer may be incomplete", "model", req.Model, "continuations", resumes)
+			}
+			return st.finish(sink, t.stopReason)
+		}
+		slog.Debug("resuming paused anthropic turn", "model", req.Model, "continuation", resumes+1)
+		body.withContinuation(t.blocks)
+	}
+}
+
+// send makes one Messages API call and parses its stream.
+func (p *Provider) send(ctx context.Context, body messagesRequest, st *streamState, sink domain.EventSink) (turn, error) {
+	ctx, cancel := context.WithCancelCause(ctx)
+	defer cancel(nil)
 	b, err := json.Marshal(body)
 	if err != nil {
-		return fmt.Errorf("encode anthropic request: %w", err)
+		return turn{}, fmt.Errorf("encode anthropic request: %w", err)
 	}
 
 	hreq, err := http.NewRequestWithContext(ctx, http.MethodPost, p.cfg.BaseURL+"/v1/messages", bytes.NewReader(b))
 	if err != nil {
-		return err
+		return turn{}, err
 	}
 	hreq.Header.Set("Content-Type", "application/json")
 	hreq.Header.Set("Accept", "text/event-stream")
@@ -105,9 +133,9 @@ func (p *Provider) Chat(ctx context.Context, req domain.ChatRequest, sink domain
 	resp, err := p.cfg.Client.Do(hreq)
 	if err != nil {
 		if ctx.Err() != nil {
-			return ctx.Err()
+			return turn{}, ctx.Err()
 		}
-		return fmt.Errorf("%w: %v", domain.ErrUnavailable, err)
+		return turn{}, fmt.Errorf("%w: %v", domain.ErrUnavailable, err)
 	}
 	defer resp.Body.Close()
 	// Everything after the headers is read through the watchdog, error
@@ -120,15 +148,21 @@ func (p *Provider) Chat(ctx context.Context, req domain.ChatRequest, sink domain
 		if errors.Is(context.Cause(ctx), errIdle) {
 			// The body stalled part-way; relaying a truncated JSON error
 			// would only fail to parse. Report the stall instead (502).
-			return fmt.Errorf("anthropic returned HTTP %d, then its error body stalled: %w", resp.StatusCode, errIdle)
+			return turn{}, fmt.Errorf("anthropic returned HTTP %d, then its error body stalled: %w", resp.StatusCode, errIdle)
 		}
-		return &domain.UpstreamError{Status: resp.StatusCode, ContentType: resp.Header.Get("Content-Type"), Body: raw, RetryAfter: resp.Header.Get("Retry-After")}
+		// Relayed verbatim only while nothing has been sent; a failed
+		// continuation is mid-answer, so it becomes an in-stream error.
+		ue := &domain.UpstreamError{Status: resp.StatusCode, ContentType: resp.Header.Get("Content-Type"), Body: raw, RetryAfter: resp.Header.Get("Retry-After")}
+		if st.started {
+			return turn{}, fmt.Errorf("resuming paused turn: HTTP %d: %s", ue.Status, ue.Body)
+		}
+		return turn{}, ue
 	}
-	err = parseStream(stream, sink, p.cfg.Now().Unix())
+	t, err := st.parseTurn(stream, sink)
 	if err != nil && errors.Is(context.Cause(ctx), errIdle) {
-		return fmt.Errorf("anthropic stream: %w", errIdle)
+		return turn{}, fmt.Errorf("anthropic stream: %w", errIdle)
 	}
-	return err
+	return t, err
 }
 
 // errIdle is the cause when the upstream stream goes silent. It is distinct

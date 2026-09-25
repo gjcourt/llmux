@@ -137,7 +137,7 @@ func TestParseStream_CacheTokensCountAsPrompt(t *testing.T) {
 
 func TestParseStream_FinishReasons(t *testing.T) {
 	cases := map[string]string{
-		"end_turn": "stop", "stop_sequence": "stop", "pause_turn": "stop",
+		"end_turn": "stop", "stop_sequence": "stop", "pause_turn": "length",
 		"max_tokens": "length", "refusal": "content_filter", "tool_use": "tool_calls",
 	}
 	for stop, want := range cases {
@@ -213,6 +213,104 @@ func TestParseStream_SinkErrorStops(t *testing.T) {
 func TestParseStream_MalformedEvent(t *testing.T) {
 	if err := parseStream(strings.NewReader("data: {not json\n\n"), &recorder{}, 0); err == nil {
 		t.Fatal("want error")
+	}
+}
+
+// The captured web-search stream cites two sources, each once.
+func TestParseStream_Citations(t *testing.T) {
+	rec := parseFixture(t, "websearch.sse")
+	cites := rec.kinds(domain.EventCitation)
+	if len(cites) == 0 {
+		t.Fatal("want citations from the web search fixture")
+	}
+	seen := map[string]bool{}
+	for _, c := range cites {
+		if c.Citation.URL == "" || !strings.HasPrefix(c.Citation.URL, "https://") {
+			t.Errorf("citation without a URL: %+v", c.Citation)
+		}
+		if seen[c.Citation.URL] {
+			t.Errorf("citation repeated: %s", c.Citation.URL)
+		}
+		seen[c.Citation.URL] = true
+	}
+	// Each citation arrives before the text it supports, and after Start.
+	if rec.events[0].Kind != domain.EventStart {
+		t.Error("Start must come first")
+	}
+}
+
+const evCite = `{"type":"content_block_delta","index":0,"delta":{"type":"citations_delta","citation":{"type":"web_search_result_location","url":"https://a.example/x","title":"A","cited_text":"...","encrypted_index":"E1"}}}`
+
+func TestParseStream_CitationDedupedByURL(t *testing.T) {
+	body := sse(evStart, evText, evCite, evDelta, evCite,
+		`{"type":"content_block_delta","index":0,"delta":{"type":"citations_delta","citation":{"type":"web_search_result_location","url":"https://b.example/","title":""}}}`,
+		`{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":1}}`, evStop)
+	rec := &recorder{}
+	if err := parseStream(strings.NewReader(body), rec, 0); err != nil {
+		t.Fatal(err)
+	}
+	cites := rec.kinds(domain.EventCitation)
+	if len(cites) != 2 || cites[0].Citation != (domain.Citation{URL: "https://a.example/x", Title: "A"}) || cites[1].Citation.URL != "https://b.example/" {
+		t.Errorf("citations: %+v", cites)
+	}
+}
+
+// A paused turn's blocks must round-trip exactly what the API needs to
+// resume: text with its citations, thinking with its signature, and the
+// server tool's input assembled from its JSON deltas.
+func TestParseTurn_AccumulatesBlocks(t *testing.T) {
+	body := sse(evStart,
+		`{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"","signature":""}}`,
+		`{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"let me "}}`,
+		`{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"search"}}`,
+		`{"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"SIG"}}`,
+		`{"type":"content_block_stop","index":0}`,
+		`{"type":"content_block_start","index":1,"content_block":{"type":"server_tool_use","id":"srvtoolu_1","name":"web_search","input":{}}}`,
+		`{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"query\": "}}`,
+		`{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"\"go 1.26\"}"}}`,
+		`{"type":"content_block_stop","index":1}`,
+		`{"type":"content_block_start","index":2,"content_block":{"type":"web_search_tool_result","tool_use_id":"srvtoolu_1","content":[{"type":"web_search_result","url":"https://go.dev","title":"Go","encrypted_content":"ENC"}]}}`,
+		`{"type":"content_block_stop","index":2}`,
+		`{"type":"content_block_start","index":3,"content_block":{"citations":[],"type":"text","text":""}}`,
+		`{"type":"content_block_delta","index":3,"delta":{"type":"citations_delta","citation":{"type":"web_search_result_location","url":"https://go.dev","title":"Go","encrypted_index":"EI"}}}`,
+		`{"type":"content_block_delta","index":3,"delta":{"type":"text_delta","text":"Go 1.26 is out."}}`,
+		`{"type":"content_block_stop","index":3}`,
+		`{"type":"message_delta","delta":{"stop_reason":"pause_turn"},"usage":{"output_tokens":9}}`, evStop)
+	st := newStreamState(0)
+	rec := &recorder{}
+	tr, err := st.parseTurn(strings.NewReader(body), rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tr.stopReason != "pause_turn" || len(tr.blocks) != 4 {
+		t.Fatalf("turn: %s, %d blocks", tr.stopReason, len(tr.blocks))
+	}
+	want := []string{
+		`{"signature":"SIG","thinking":"let me search","type":"thinking"}`,
+		`{"id":"srvtoolu_1","input":{"query":"go 1.26"},"name":"web_search","type":"server_tool_use"}`,
+		`{"content":[{"encrypted_content":"ENC","title":"Go","type":"web_search_result","url":"https://go.dev"}],"tool_use_id":"srvtoolu_1","type":"web_search_tool_result"}`,
+		`{"citations":[{"type":"web_search_result_location","url":"https://go.dev","title":"Go","encrypted_index":"EI"}],"text":"Go 1.26 is out.","type":"text"}`,
+	}
+	for i, w := range want {
+		if string(tr.blocks[i]) != w {
+			t.Errorf("block %d:\n got %s\nwant %s", i, tr.blocks[i], w)
+		}
+	}
+	if rec.text() != "Go 1.26 is out." {
+		t.Errorf("text: %q", rec.text())
+	}
+	if len(rec.kinds(domain.EventFinish)) != 0 {
+		t.Error("parseTurn must leave Finish to the caller")
+	}
+}
+
+func TestParseTurn_InvalidToolInput(t *testing.T) {
+	body := sse(evStart,
+		`{"type":"content_block_start","index":0,"content_block":{"type":"server_tool_use","id":"s","name":"web_search","input":{}}}`,
+		`{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"query\": "}}`,
+		`{"type":"content_block_stop","index":0}`, evStop)
+	if _, err := newStreamState(0).parseTurn(strings.NewReader(body), &recorder{}); err == nil {
+		t.Fatal("want error for truncated tool input")
 	}
 }
 

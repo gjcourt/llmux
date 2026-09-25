@@ -120,6 +120,174 @@ func TestProvider_HandlesAndModels(t *testing.T) {
 	}
 }
 
+// scripted serves one canned SSE body per request, in order, and records
+// each request body.
+type scripted struct {
+	bodies []string
+	got    [][]byte
+}
+
+func (s *scripted) handler(t *testing.T) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		s.got = append(s.got, b)
+		if len(s.got) > len(s.bodies) {
+			t.Errorf("unexpected request %d", len(s.got))
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Write([]byte(s.bodies[len(s.got)-1])) //nolint:errcheck
+	}
+}
+
+func pausedTurn(id string) string {
+	return sse(
+		`{"type":"message_start","message":{"id":"`+id+`","model":"claude-sonnet-5","usage":{"input_tokens":100,"output_tokens":1}}}`,
+		`{"type":"content_block_start","index":0,"content_block":{"type":"server_tool_use","id":"srv_`+id+`","name":"web_search","input":{}}}`,
+		`{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"query\":\"q\"}"}}`,
+		`{"type":"content_block_stop","index":0}`,
+		`{"type":"message_delta","delta":{"stop_reason":"pause_turn"},"usage":{"output_tokens":5}}`,
+		evStop)
+}
+
+func finalTurn(text string) string {
+	return sse(
+		`{"type":"message_start","message":{"id":"msg_final","model":"claude-sonnet-5","usage":{"input_tokens":300,"output_tokens":1}}}`,
+		`{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`,
+		`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"`+text+`"}}`,
+		`{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":7}}`,
+		evStop)
+}
+
+// A paused turn is resumed with the paused blocks appended as an assistant
+// message, and the client sees one answer: one Start, one Finish, summed usage.
+func TestProvider_ResumesPausedTurn(t *testing.T) {
+	s := &scripted{bodies: []string{pausedTurn("m1"), finalTurn("done")}}
+	srv := httptest.NewServer(s.handler(t))
+	defer srv.Close()
+	p := New(Config{BaseURL: srv.URL, Models: []string{"claude-sonnet-5"}, WebSearchMaxUses: 3})
+
+	rec := &recorder{}
+	if err := p.Chat(context.Background(), domain.ChatRequest{Model: "claude-sonnet-5", Messages: []domain.Message{user("q?")}}, rec); err != nil {
+		t.Fatal(err)
+	}
+	if len(s.got) != 2 {
+		t.Fatalf("want 2 upstream calls, got %d", len(s.got))
+	}
+	var second struct {
+		Messages []struct {
+			Role    string          `json:"role"`
+			Content json.RawMessage `json:"content"`
+		} `json:"messages"`
+		Tools []map[string]any `json:"tools"`
+	}
+	if err := json.Unmarshal(s.got[1], &second); err != nil {
+		t.Fatal(err)
+	}
+	if len(second.Messages) != 2 || second.Messages[1].Role != "assistant" ||
+		string(second.Messages[1].Content) != `[{"id":"srv_m1","input":{"query":"q"},"name":"web_search","type":"server_tool_use"}]` {
+		t.Errorf("resume request messages: %s", s.got[1])
+	}
+	if len(second.Tools) != 1 || second.Tools[0]["type"] != "web_search_20250305" || second.Tools[0]["max_uses"] != float64(3) {
+		t.Errorf("resume must keep the tool: %v", second.Tools)
+	}
+	if n := len(rec.kinds(domain.EventStart)); n != 1 {
+		t.Errorf("want one Start, got %d", n)
+	}
+	if rec.events[0].ID != "m1" || rec.text() != "done" {
+		t.Errorf("events: %+v", rec.events)
+	}
+	fin, us := rec.kinds(domain.EventFinish), rec.kinds(domain.EventUsage)
+	if len(fin) != 1 || fin[0].FinishReason != "stop" {
+		t.Errorf("finish: %+v", fin)
+	}
+	if len(us) != 1 || us[0].Usage != (domain.Usage{PromptTokens: 400, CompletionTokens: 12, TotalTokens: 412}) {
+		t.Errorf("usage must sum both calls: %+v", us)
+	}
+}
+
+// Resumes are capped: after maxContinuations the answer finishes as length.
+func TestProvider_ContinuationCap(t *testing.T) {
+	bodies := make([]string, maxContinuations+1)
+	for i := range bodies {
+		bodies[i] = pausedTurn("m")
+	}
+	s := &scripted{bodies: bodies}
+	srv := httptest.NewServer(s.handler(t))
+	defer srv.Close()
+	p := New(Config{BaseURL: srv.URL, Models: []string{"claude-sonnet-5"}, WebSearchMaxUses: 3})
+	rec := &recorder{}
+	if err := p.Chat(context.Background(), domain.ChatRequest{Model: "claude-sonnet-5", Messages: []domain.Message{user("q?")}}, rec); err != nil {
+		t.Fatal(err)
+	}
+	if len(s.got) != maxContinuations+1 {
+		t.Errorf("want %d calls, got %d", maxContinuations+1, len(s.got))
+	}
+	if fin := rec.kinds(domain.EventFinish); len(fin) != 1 || fin[0].FinishReason != "length" {
+		t.Errorf("finish: %+v", fin)
+	}
+	// Each resume appends to the same assistant message rather than adding
+	// consecutive assistant turns.
+	var last struct {
+		Messages []struct {
+			Role    string            `json:"role"`
+			Content []json.RawMessage `json:"content"`
+		} `json:"messages"`
+	}
+	json.Unmarshal(s.got[len(s.got)-1], &last) //nolint:errcheck
+	if len(last.Messages) != 2 || len(last.Messages[1].Content) != maxContinuations {
+		t.Errorf("want 1 user + 1 assistant with %d blocks, got %s", maxContinuations, s.got[len(s.got)-1])
+	}
+}
+
+// A failed resume happens mid-answer, so it must not be relayed as an HTTP
+// status (headers are already sent); it is an error the handler turns into
+// an in-stream error chunk.
+func TestProvider_FailedResumeIsMidStreamError(t *testing.T) {
+	calls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls++
+		if calls == 1 {
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.Write([]byte(pausedTurn("m"))) //nolint:errcheck
+			return
+		}
+		w.WriteHeader(http.StatusTooManyRequests)
+		w.Write([]byte(`{"type":"error","error":{"type":"rate_limit_error","message":"slow down"}}`)) //nolint:errcheck
+	}))
+	defer srv.Close()
+	p := New(Config{BaseURL: srv.URL, Models: []string{"claude-sonnet-5"}, WebSearchMaxUses: 3})
+	err := p.Chat(context.Background(), domain.ChatRequest{Model: "claude-sonnet-5", Messages: []domain.Message{user("q?")}}, &recorder{})
+	var ue *domain.UpstreamError
+	if err == nil || errors.As(err, &ue) {
+		t.Fatalf("want a plain mid-stream error, got %v", err)
+	}
+}
+
+func TestBuildRequest_WebSearchTool(t *testing.T) {
+	off, _ := buildRequest(domain.ChatRequest{Model: "m", Messages: []domain.Message{user("x")}}, 10, 0)
+	if off.Tools != nil {
+		t.Error("0 must leave web search off")
+	}
+	on, _ := buildRequest(domain.ChatRequest{Model: "m", Messages: []domain.Message{user("x")}}, 10, 3)
+	b, _ := json.Marshal(on.Tools)
+	if string(b) != `[{"type":"web_search_20250305","name":"web_search","max_uses":3}]` {
+		t.Errorf("tools: %s", b)
+	}
+}
+
+// A client prefill (conversation ending in an assistant message) is extended,
+// not followed by a second assistant message.
+func TestWithContinuation_ExtendsPrefill(t *testing.T) {
+	r, _ := buildRequest(domain.ChatRequest{Model: "m", Messages: []domain.Message{user("x"), {Role: "assistant", Content: "Sure:"}}}, 10, 3)
+	r.withContinuation([]json.RawMessage{json.RawMessage(`{"type":"server_tool_use"}`)})
+	b, _ := json.Marshal(r.Messages)
+	if string(b) != `[{"role":"user","content":"x"},{"role":"assistant","content":[{"text":"Sure:","type":"text"},{"type":"server_tool_use"}]}]` {
+		t.Errorf("messages: %s", b)
+	}
+}
+
 // Critique #29 pass 1: Go strips Authorization on a cross-host redirect but
 // not x-api-key. The provider must not follow redirects at all.
 func TestProvider_DoesNotFollowRedirects(t *testing.T) {

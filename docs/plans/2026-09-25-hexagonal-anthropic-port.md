@@ -194,3 +194,14 @@ repair) move into `openaicompat` unchanged; their invariants and tests carry ove
 2. **Anthropic adapter** — plain chat, streaming + non-streaming, no tools.
 3. **Web search + citations** — the translation table, golden-stream tests.
 4. **Homelab deploy** — staging, browser test, then production cutover.
+
+## Status
+
+- Phase 1 (hexagonal restructure): merged, #28.
+- Phase 2 (Anthropic adapter, plain chat): merged, #29.
+- Phase 3 (web search + citations): implemented as planned. Measured live
+  2026-09-25: a searched Sonnet 5 answer streamed one `url_citation`
+  annotation and no `tool_calls`, costing ~13k input tokens. `pause_turn`
+  resumption is covered by tests against scripted streams; it was not
+  provoked live.
+- Phase 4 (homelab deploy): homelab#1471 (draft); the image workflow merged in #30.

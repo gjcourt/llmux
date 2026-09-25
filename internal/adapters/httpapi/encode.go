@@ -27,9 +27,26 @@ type sseChoice struct {
 }
 
 type sseDelta struct {
-	Role      string             `json:"role,omitempty"`
-	Content   *string            `json:"content,omitempty"`
-	ToolCalls []sseToolCallDelta `json:"tool_calls,omitempty"`
+	Role        string             `json:"role,omitempty"`
+	Content     *string            `json:"content,omitempty"`
+	ToolCalls   []sseToolCallDelta `json:"tool_calls,omitempty"`
+	Annotations []wireAnnotation   `json:"annotations,omitempty"`
+}
+
+// wireAnnotation is OpenAI's url_citation annotation. Open WebUI renders it
+// as a source chip under the answer; unlike tool_calls, it never executes it.
+type wireAnnotation struct {
+	Type        string `json:"type"`
+	URLCitation struct {
+		URL   string `json:"url"`
+		Title string `json:"title,omitempty"`
+	} `json:"url_citation"`
+}
+
+func annotation(c domain.Citation) wireAnnotation {
+	a := wireAnnotation{Type: "url_citation"}
+	a.URLCitation.URL, a.URLCitation.Title = c.URL, c.Title
+	return a
 }
 
 type sseToolCallDelta struct {
@@ -119,6 +136,8 @@ func (s *sseSink) Emit(e domain.Event) error {
 			tc.Function = &sseToolFuncDelta{Name: e.ToolCall.Name, Arguments: e.ToolCall.ArgumentsDelta}
 		}
 		return s.write(s.chunk(sseDelta{ToolCalls: []sseToolCallDelta{tc}}, nil))
+	case domain.EventCitation:
+		return s.write(s.chunk(sseDelta{Annotations: []wireAnnotation{annotation(e.Citation)}}, nil))
 	case domain.EventFinish:
 		fr := e.FinishReason
 		return s.write(s.chunk(sseDelta{}, &fr))
@@ -154,6 +173,7 @@ type jsonSink struct {
 	content      strings.Builder
 	hasContent   bool
 	toolCalls    map[int]*wireToolCall
+	annotations  []wireAnnotation
 	finishReason string
 	usage        *wireUsage
 }
@@ -192,6 +212,8 @@ func (j *jsonSink) Emit(e domain.Event) error {
 		}
 		tc.Function.Name += e.ToolCall.Name
 		tc.Function.Arguments += e.ToolCall.ArgumentsDelta
+	case domain.EventCitation:
+		j.annotations = append(j.annotations, annotation(e.Citation))
 	case domain.EventFinish:
 		j.finishReason = e.FinishReason
 	case domain.EventUsage:
@@ -219,6 +241,9 @@ func (j *jsonSink) response() map[string]any {
 		if !j.hasContent {
 			msg["content"] = nil
 		}
+	}
+	if len(j.annotations) > 0 {
+		msg["annotations"] = j.annotations
 	}
 	fr := j.finishReason
 	if fr == "" {

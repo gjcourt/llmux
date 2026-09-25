@@ -142,3 +142,17 @@ func TestProvidersFromEnv_BadMaxTokens(t *testing.T) {
 		}
 	}
 }
+
+func TestProvidersFromEnv_BadWebSearchMaxUses(t *testing.T) {
+	t.Setenv("LLMUX_ANTHROPIC_API_KEY", "k")
+	for _, v := range []string{"-1", "three"} {
+		t.Setenv("LLMUX_WEB_SEARCH_MAX_USES", v)
+		if _, err := providersFromEnv(); err == nil {
+			t.Errorf("%q: want error", v)
+		}
+	}
+	t.Setenv("LLMUX_WEB_SEARCH_MAX_USES", "0")
+	if _, err := providersFromEnv(); err != nil {
+		t.Errorf("0 disables search and must be accepted: %v", err)
+	}
+}

@@ -122,6 +122,75 @@ func TestE2E_AnthropicRejectsToolsAndImages(t *testing.T) {
 	}
 }
 
+// Citations reach the client as OpenAI url_citation annotations — what Open
+// WebUI renders as source chips — and never as tool_calls, which it would try
+// to execute.
+func TestE2E_AnthropicCitationsStream(t *testing.T) {
+	srv := anthropicStack(t, "websearch.sse", nil)
+	_, body := post(t, srv, `{"model":"claude-sonnet-5","stream":true,"messages":[{"role":"user","content":"latest open webui?"}]}`)
+	var urls []string
+	for line := range strings.SplitSeq(body, "\n") {
+		data, ok := strings.CutPrefix(line, "data: ")
+		if !ok || data == "[DONE]" {
+			continue
+		}
+		var c struct {
+			Choices []struct {
+				Delta map[string]json.RawMessage `json:"delta"`
+			} `json:"choices"`
+		}
+		if err := json.Unmarshal([]byte(data), &c); err != nil {
+			t.Fatal(err)
+		}
+		for _, ch := range c.Choices {
+			if _, bad := ch.Delta["tool_calls"]; bad {
+				t.Fatalf("tool_calls emitted: %s", data)
+			}
+			if raw, ok := ch.Delta["annotations"]; ok {
+				var anns []struct {
+					Type        string `json:"type"`
+					URLCitation struct {
+						URL   string `json:"url"`
+						Title string `json:"title"`
+					} `json:"url_citation"`
+				}
+				if err := json.Unmarshal(raw, &anns); err != nil {
+					t.Fatal(err)
+				}
+				for _, a := range anns {
+					if a.Type != "url_citation" || a.URLCitation.URL == "" {
+						t.Errorf("bad annotation: %s", raw)
+					}
+					urls = append(urls, a.URLCitation.URL)
+				}
+			}
+		}
+	}
+	if len(urls) == 0 {
+		t.Fatal("no url_citation annotations in the stream")
+	}
+}
+
+func TestE2E_AnthropicCitationsNonStream(t *testing.T) {
+	srv := anthropicStack(t, "websearch.sse", nil)
+	_, body := post(t, srv, `{"model":"claude-sonnet-5","messages":[{"role":"user","content":"latest open webui?"}]}`)
+	var out struct {
+		Choices []struct {
+			Message struct {
+				Annotations []struct {
+					Type string `json:"type"`
+				} `json:"annotations"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal([]byte(body), &out); err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Choices[0].Message.Annotations) == 0 || out.Choices[0].Message.Annotations[0].Type != "url_citation" {
+		t.Errorf("want url_citation annotations on the message: %s", body)
+	}
+}
+
 // fakeAnthropic answers every request with status, headers and body.
 func fakeAnthropic(t *testing.T, h http.HandlerFunc) *httptest.Server {
 	t.Helper()

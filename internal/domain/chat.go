@@ -55,13 +55,17 @@ type ToolCall struct {
 type EventKind int
 
 // Event kinds, in the order a well-formed response produces them: one Start,
-// then any mix of Text and ToolCall, then Finish, optionally followed by Usage.
+// then any mix of Text, ToolCall and Citation, then Finish, optionally
+// followed by Usage.
 const (
 	EventStart EventKind = iota + 1
 	EventText
 	EventToolCall
 	EventFinish
 	EventUsage
+	// EventCitation is a source the answer draws on, e.g. a web search
+	// result. It is informational: never something the client should act on.
+	EventCitation
 )
 
 // Event is one step of a provider's answer.
@@ -84,6 +88,15 @@ type Event struct {
 
 	// Usage
 	Usage Usage
+
+	// Citation
+	Citation Citation
+}
+
+// Citation is a source a provider cites.
+type Citation struct {
+	URL   string
+	Title string
 }
 
 // ToolCallDelta is an incremental piece of a tool call. The first delta for a

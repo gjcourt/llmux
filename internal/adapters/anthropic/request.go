@@ -1,6 +1,7 @@
 package anthropic
 
 import (
+	"encoding/json"
 	"log/slog"
 	"strconv"
 	"strings"
@@ -11,17 +12,49 @@ import (
 
 // messagesRequest is the body of POST /v1/messages.
 type messagesRequest struct {
-	Model         string    `json:"model"`
-	MaxTokens     int       `json:"max_tokens"`
-	System        string    `json:"system,omitempty"`
-	Messages      []message `json:"messages"`
-	StopSequences []string  `json:"stop_sequences,omitempty"`
-	Stream        bool      `json:"stream"`
+	Model         string      `json:"model"`
+	MaxTokens     int         `json:"max_tokens"`
+	System        string      `json:"system,omitempty"`
+	Messages      []message   `json:"messages"`
+	StopSequences []string    `json:"stop_sequences,omitempty"`
+	Tools         []webSearch `json:"tools,omitempty"`
+	Stream        bool        `json:"stream"`
 }
 
+// message content is a string for a translated client message, or the raw
+// content blocks of a paused assistant turn being resumed.
 type message struct {
 	Role    string `json:"role"`
-	Content string `json:"content"`
+	Content any    `json:"content"`
+}
+
+// webSearch is Anthropic's server-side web search tool. Anthropic runs the
+// searches itself; llmux only relays the answer and its citations.
+type webSearch struct {
+	Type    string `json:"type"`
+	Name    string `json:"name"`
+	MaxUses int    `json:"max_uses"`
+}
+
+// withContinuation appends a paused assistant turn so the API can resume it.
+// If the conversation already ends with an assistant message (a client
+// prefill), the blocks extend that message rather than starting another.
+func (r *messagesRequest) withContinuation(blocks []json.RawMessage) {
+	if n := len(r.Messages); n > 0 && r.Messages[n-1].Role == "assistant" {
+		last := &r.Messages[n-1]
+		var content []json.RawMessage
+		switch c := last.Content.(type) {
+		case string:
+			b, _ := json.Marshal(map[string]string{"type": "text", "text": c})
+			content = append(content, b)
+		case []json.RawMessage:
+			content = c
+		}
+		content = append(content, blocks...)
+		last.Content = content
+		return
+	}
+	r.Messages = append(r.Messages, message{Role: "assistant", Content: blocks})
 }
 
 // buildRequest translates a ChatRequest into a Messages API request.
@@ -37,7 +70,10 @@ type message struct {
 //     model answer as if the user's tools didn't exist.
 //   - images and other non-text parts are rejected, for the same reason: a
 //     message whose image was dropped would be answered as if it had none.
-func buildRequest(req domain.ChatRequest, defaultMaxTokens int) (messagesRequest, error) {
+//
+// maxSearches > 0 offers the model the web search tool, capped at that many
+// searches per request; 0 leaves it off.
+func buildRequest(req domain.ChatRequest, defaultMaxTokens, maxSearches int) (messagesRequest, error) {
 	if len(req.Tools) > 0 {
 		return messagesRequest{}, &domain.InvalidRequestError{Msg: "tools are not supported for Anthropic models in llmux yet"}
 	}
@@ -46,6 +82,9 @@ func buildRequest(req domain.ChatRequest, defaultMaxTokens int) (messagesRequest
 	}
 
 	out := messagesRequest{Model: req.Model, MaxTokens: defaultMaxTokens, Stream: true}
+	if maxSearches > 0 {
+		out.Tools = []webSearch{{Type: "web_search_20250305", Name: "web_search", MaxUses: maxSearches}}
+	}
 	if req.MaxTokens != nil && *req.MaxTokens > 0 {
 		out.MaxTokens = *req.MaxTokens
 	}
@@ -86,7 +125,9 @@ func buildRequest(req domain.ChatRequest, defaultMaxTokens int) (messagesRequest
 	// prefill outright, and that 400 is relayed as-is — its message says
 	// exactly what's wrong.
 	if last := &out.Messages[len(out.Messages)-1]; last.Role == "assistant" {
-		last.Content = strings.TrimRightFunc(last.Content, unicode.IsSpace)
+		if text, ok := last.Content.(string); ok {
+			last.Content = strings.TrimRightFunc(text, unicode.IsSpace)
+		}
 	}
 	out.System = strings.Join(system, "\n\n")
 

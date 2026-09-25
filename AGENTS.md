@@ -1,6 +1,6 @@
 # AGENTS.md
 
-> llmux is an OpenAI-compatible HTTP proxy that routes chat requests to model backends. Backends: Anthropic (native Messages API; web search planned, docs/plans/2026-09-25-hexagonal-anthropic-port.md) and vLLM/Ollama, where it repairs malformed tool calls and strips `<think>` blocks. — https://github.com/gjcourt/llmux
+> llmux is an OpenAI-compatible HTTP proxy that routes chat requests to model backends. Backends: Anthropic (native Messages API, with server-side web search and cited sources) and vLLM/Ollama, where it repairs malformed tool calls and strips `<think>` blocks. — https://github.com/gjcourt/llmux
 
 ## Commands
 
@@ -26,7 +26,7 @@ internal/ports/inbound/         ChatService
 internal/ports/outbound/        ChatProvider
 internal/app/                   routes a request to the first provider that Handles(model)
 internal/adapters/httpapi/      inbound: OpenAI-compatible /v1/chat/completions, /v1/models, /healthz
-internal/adapters/anthropic/    outbound: Anthropic Messages API (text only in v1)
+internal/adapters/anthropic/    outbound: Anthropic Messages API — text, web search, citations
 internal/adapters/openaicompat/ outbound: vLLM + Ollama, failover, tool-call transform
 internal/testdoubles/           scripted fake ChatProvider
 ```
@@ -45,9 +45,14 @@ list; openaicompat handles everything, so it must be registered last
 (`providersFromEnv`, pinned by a test).
 
 The Anthropic provider always streams upstream, even for a non-streaming
-client, and relays only text blocks: thinking and server-tool blocks are
-dropped, and nothing it emits is ever a tool call — Open WebUI would try to
-execute it. It always drops `temperature`/`top_p` (the Claude 5 family 400s
+client. It offers the model Anthropic's server-side web search
+(`LLMUX_WEB_SEARCH_MAX_USES`, default 3 per request; 0 turns it off) and
+relays text plus each cited source once, as an OpenAI `url_citation`
+annotation, which Open WebUI shows as a source chip. Thinking and
+server-tool blocks are dropped, and **nothing it emits is ever a tool call**
+— Open WebUI executes tool calls it receives. A turn that pauses mid-search
+(`pause_turn`) is resumed with its blocks sent back verbatim, up to 3 times,
+into the same response. It always drops `temperature`/`top_p` (the Claude 5 family 400s
 on either) and rejects client tools, tool history and images with a 400
 rather than silently dropping them. Its HTTP client must never follow
 redirects (`anthropic.HTTPClient`): `x-api-key` survives a cross-host redirect.
@@ -91,7 +96,7 @@ Tool-calling models in vLLM/Ollama frequently return malformed JSON tool calls �
 
 | Service | Endpoint | Purpose |
 |---|---|---|
-| Anthropic | `LLMUX_ANTHROPIC_URL` (default `https://api.anthropic.com`) | Enabled by `LLMUX_ANTHROPIC_API_KEY`. `LLMUX_ANTHROPIC_MODELS` (default `claude-sonnet-5,claude-opus-5,claude-haiku-4-5`) is both the routing list and what `/v1/models` shows. `LLMUX_ANTHROPIC_MAX_TOKENS` (default 8192) applies when a request sets none |
+| Anthropic | `LLMUX_ANTHROPIC_URL` (default `https://api.anthropic.com`) | Enabled by `LLMUX_ANTHROPIC_API_KEY`. `LLMUX_WEB_SEARCH_MAX_USES` (default 3; 0 = off) caps searches per request — each searched answer costs ~11–30k input tokens. `LLMUX_ANTHROPIC_MODELS` (default `claude-sonnet-5,claude-opus-5,claude-haiku-4-5`) is both the routing list and what `/v1/models` shows. `LLMUX_ANTHROPIC_MAX_TOKENS` (default 8192) applies when a request sets none |
 | vLLM | `LLMUX_VLLM_URL` (default empty = off) | Tool-capable local backend; was `http://10.42.2.10:8000` |
 | Ollama | `LLMUX_OLLAMA_URL` (default empty = off) | Local-model backend; was `http://10.42.2.10:30068/v1` |
 
