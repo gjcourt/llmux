@@ -31,17 +31,17 @@ func TestMetering_Observation(t *testing.T) {
 	}}
 	m := &testdoubles.Metrics{}
 	sink := &recordingSink{}
-	if err := app.New(p).WithMetrics(m).Chat(context.Background(), domain.ChatRequest{Model: "claude-sonnet-5", Stream: true}, sink); err != nil {
+	if err := app.New(p).WithMetrics(m).Chat(context.Background(), domain.ChatRequest{Client: "web", Model: "claude-sonnet-5", Stream: true}, sink); err != nil {
 		t.Fatal(err)
 	}
 	if len(sink.kinds) != 6 {
 		t.Errorf("events must pass through untouched: %v", sink.kinds)
 	}
-	if len(m.Started) != 1 || m.Started[0] != "anthropic/claude-sonnet-5" || len(m.Finished) != 1 {
+	if len(m.Started) != 1 || m.Started[0] != "web/anthropic/claude-sonnet-5" || len(m.Finished) != 1 {
 		t.Fatalf("started %v finished %d", m.Started, len(m.Finished))
 	}
 	o := m.Finished[0]
-	if o.Provider != "anthropic" || o.Model != "claude-sonnet-5" || !o.Stream || o.Outcome != outbound.OutcomeOK ||
+	if o.Client != "web" || o.Provider != "anthropic" || o.Model != "claude-sonnet-5" || !o.Stream || o.Outcome != outbound.OutcomeOK ||
 		o.Citations != 2 || o.FinishReason != "stop" || o.Usage == nil || *o.Usage != usage {
 		t.Errorf("observation: %+v", o)
 	}

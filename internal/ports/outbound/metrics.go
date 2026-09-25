@@ -30,6 +30,7 @@ const (
 
 // ChatObservation is everything telemetry learns about one chat request.
 type ChatObservation struct {
+	Client   string // who called: an llmux client key's name, or "anonymous"
 	Provider string // provider Name(), or "none" when nothing served it
 	Model    string // the requested model id, or "unrouted" when nothing served it
 	Stream   bool
@@ -50,7 +51,7 @@ type ChatObservation struct {
 // be safe for concurrent use and must not block: they sit on the request path.
 type Metrics interface {
 	// ChatStarted is called when a provider starts serving a request.
-	ChatStarted(provider, model string)
+	ChatStarted(client, provider, model string)
 	// ChatFinished is called once per request, after ChatStarted if a
 	// provider served it.
 	ChatFinished(ChatObservation)

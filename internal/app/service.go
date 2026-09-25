@@ -42,7 +42,7 @@ func (s *Service) Chat(ctx context.Context, req domain.ChatRequest, sink domain.
 			continue
 		}
 		slog.Info("routing request", "provider", p.Name(), "model", req.Model, "stream", req.Stream)
-		s.metrics.ChatStarted(p.Name(), req.Model)
+		s.metrics.ChatStarted(req.Client, p.Name(), req.Model)
 		ms := &meteringSink{next: sink, start: start, now: s.now}
 		// Deferred so a panicking provider still balances ChatStarted
 		// (net/http recovers handler panics; the in-flight gauge would
@@ -54,7 +54,7 @@ func (s *Service) Chat(ctx context.Context, req domain.ChatRequest, sink domain.
 				outcome = outbound.OutcomeError
 			}
 			s.metrics.ChatFinished(outbound.ChatObservation{
-				Provider: p.Name(), Model: req.Model, Stream: req.Stream,
+				Client: req.Client, Provider: p.Name(), Model: req.Model, Stream: req.Stream,
 				Outcome:  outcome,
 				Duration: s.now().Sub(start), TimeToFirstToken: ms.ttft,
 				Usage: ms.usage, Citations: ms.citations, FinishReason: ms.finish,
@@ -68,7 +68,7 @@ func (s *Service) Chat(ctx context.Context, req domain.ChatRequest, sink domain.
 	// The requested model is client input with no provider behind it; it
 	// is not used as a label, so a client can't grow the series count.
 	s.metrics.ChatFinished(outbound.ChatObservation{
-		Provider: "none", Model: "unrouted", Stream: req.Stream,
+		Client: req.Client, Provider: "none", Model: "unrouted", Stream: req.Stream,
 		Outcome: outbound.OutcomeNoProvider, Duration: s.now().Sub(start),
 	})
 	return domain.ErrNoProvider

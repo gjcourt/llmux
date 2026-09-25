@@ -13,6 +13,10 @@ import (
 // ChatRequest is a chat-completion request, parsed from the OpenAI wire format
 // by the inbound adapter.
 type ChatRequest struct {
+	// Client names who is calling (an llmux client key's name), for
+	// attribution; "anonymous" when client keys are off.
+	Client string
+
 	Model        string
 	Messages     []Message
 	Stream       bool

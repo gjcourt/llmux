@@ -70,5 +70,5 @@ func classify(ctx context.Context, err error) outbound.Outcome {
 // nopMetrics is the default: telemetry off.
 type nopMetrics struct{}
 
-func (nopMetrics) ChatStarted(string, string)            {}
+func (nopMetrics) ChatStarted(string, string, string)    {}
 func (nopMetrics) ChatFinished(outbound.ChatObservation) {}

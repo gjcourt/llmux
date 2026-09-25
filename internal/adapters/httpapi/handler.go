@@ -21,16 +21,22 @@ const maxBody = 64 << 20
 
 // Handler serves the OpenAI-compatible routes.
 type Handler struct {
-	svc inbound.ChatService
+	svc           inbound.ChatService
+	keys          []clientKey
+	onAuthFailure func(reason string)
+	authLog       authLog
 }
 
 // New returns the HTTP handler for svc.
-func New(svc inbound.ChatService) http.Handler {
+func New(svc inbound.ChatService, opts ...Option) http.Handler {
 	h := &Handler{svc: svc}
+	for _, o := range opts {
+		o(h)
+	}
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /v1/chat/completions", h.chat)
-	mux.HandleFunc("GET /v1/models", h.models)
-	mux.HandleFunc("GET /healthz", h.healthz)
+	mux.HandleFunc("POST /v1/chat/completions", h.authenticate(h.chat))
+	mux.HandleFunc("GET /v1/models", h.authenticate(h.models))
+	mux.HandleFunc("GET /healthz", h.healthz) // unauthenticated: probes
 	return mux
 }
 
@@ -55,6 +61,7 @@ func (h *Handler) chat(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	req.Client = clientFrom(r.Context())
 	slog.Debug("incoming request", "model", req.Model, "stream", req.Stream, "len", len(body))
 
 	if req.Stream {

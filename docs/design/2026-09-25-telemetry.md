@@ -51,7 +51,7 @@ format.
 
 ## Metrics
 
-All labelled `provider`, `model`.
+All labelled `client`, `provider`, `model`. `client` is the llmux client key's name (`anonymous` when client keys are off).
 
 | Metric | Type | Extra labels | Notes |
 |---|---|---|---|
@@ -64,6 +64,7 @@ All labelled `provider`, `model`.
 | `llmux_citations_total` | counter | | distinct sources cited |
 | `llmux_chat_finish_reasons_total` | counter | `reason` | a rising `length` share means answers are being cut off |
 | `llmux_chat_usage_missing_total` | counter | | successful answers with no usage — tokens undercount them |
+| `llmux_auth_failures_total` | counter | `reason` only | requests rejected for a missing or invalid client key; no client/provider/model labels — the caller is unknown |
 
 **Cardinality.** `model` is the requested id of a request some provider
 served. An unrouted request is recorded as `provider="none", model="unrouted"`,

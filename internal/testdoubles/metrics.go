@@ -9,17 +9,17 @@ import (
 // Metrics records what the application core reports to outbound.Metrics.
 type Metrics struct {
 	mu       sync.Mutex
-	Started  []string // "provider/model"
+	Started  []string // "client/provider/model"
 	Finished []outbound.ChatObservation
 }
 
 var _ outbound.Metrics = (*Metrics)(nil)
 
 // ChatStarted implements outbound.Metrics.
-func (m *Metrics) ChatStarted(provider, model string) {
+func (m *Metrics) ChatStarted(client, provider, model string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.Started = append(m.Started, provider+"/"+model)
+	m.Started = append(m.Started, client+"/"+provider+"/"+model)
 }
 
 // ChatFinished implements outbound.Metrics.

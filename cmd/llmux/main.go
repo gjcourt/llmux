@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/http"
@@ -55,7 +56,23 @@ func run() error {
 		slog.Warn("no model backends configured; every chat request will return 404")
 	}
 
+	clientKeys, err := clientKeysFromEnv()
+	if err != nil {
+		return err
+	}
+	clients := []string{httpapi.Anonymous}
+	if len(clientKeys) > 0 {
+		clients = clients[:0]
+		for name := range clientKeys {
+			clients = append(clients, name)
+		}
+		slog.Info("client keys on", "clients", clients)
+	} else {
+		slog.Warn("no client keys configured: llmux accepts unauthenticated requests")
+	}
+
 	svc := app.New(providers...)
+	var authHook func(reason string)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -69,7 +86,7 @@ func run() error {
 	defer stopMetrics()
 	metricsDone := make(chan error, 1)
 	if maddr := envOr("LLMUX_METRICS_ADDR", ":9090"); maddr != "" {
-		metrics := prommetrics.New()
+		metrics := prommetrics.New(clients)
 		// Anthropic's model list is static config; pre-create its series.
 		// vLLM/Ollama serve whatever id they're sent, so theirs can't be.
 		for _, p := range providers {
@@ -86,6 +103,7 @@ func run() error {
 			}
 		}
 		svc.WithMetrics(metrics)
+		authHook = metrics.AuthFailed
 		mux := http.NewServeMux()
 		mux.Handle("GET /metrics", metrics.Handler())
 		mln, err := net.Listen("tcp", maddr)
@@ -107,7 +125,7 @@ func run() error {
 	}
 
 	srv := &http.Server{
-		Handler:           httpapi.New(svc),
+		Handler:           httpapi.New(svc, httpapi.WithClientKeys(clientKeys), httpapi.WithAuthFailureHook(authHook)),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	ln, err := net.Listen("tcp", addr)
@@ -203,4 +221,62 @@ func splitList(s string) []string {
 		}
 	}
 	return out
+}
+
+// clientKeysFromEnv reads LLMUX_CLIENT_KEYS, "name=key,name=key" (from a
+// secret). Names label telemetry, so they're restricted to [a-z0-9-]; keys
+// must be long enough not to be guessable. With LLMUX_REQUIRE_CLIENT_KEYS
+// true, an empty list is an error rather than an unauthenticated llmux.
+func clientKeysFromEnv() (map[string]string, error) {
+	keys := map[string]string{}
+	seen := map[string]bool{}
+	for _, entry := range splitList(os.Getenv("LLMUX_CLIENT_KEYS")) {
+		name, key, ok := strings.Cut(entry, "=")
+		name, key = strings.TrimSpace(name), strings.TrimSpace(key)
+		switch {
+		case !ok || name == "" || key == "":
+			return nil, errors.New("LLMUX_CLIENT_KEYS: each entry must be name=key")
+		case !validClientName(name):
+			return nil, fmt.Errorf("LLMUX_CLIENT_KEYS: client name %q must be lowercase letters, digits and hyphens", name)
+		case name == httpapi.Anonymous:
+			return nil, fmt.Errorf("LLMUX_CLIENT_KEYS: %q is reserved", name)
+		case len(key) < 32:
+			return nil, fmt.Errorf("LLMUX_CLIENT_KEYS: key for %q is shorter than 32 characters", name)
+		case !validClientKey(key):
+			return nil, fmt.Errorf("LLMUX_CLIENT_KEYS: key for %q must be letters, digits, '-' or '_' (generate with: openssl rand -hex 32)", name)
+		case keys[name] != "":
+			return nil, fmt.Errorf("LLMUX_CLIENT_KEYS: client %q listed twice", name)
+		case seen[key]:
+			return nil, fmt.Errorf("LLMUX_CLIENT_KEYS: two clients share a key (%q is the second)", name)
+		}
+		keys[name], seen[key] = key, true
+	}
+	required, err := strconv.ParseBool(envOr("LLMUX_REQUIRE_CLIENT_KEYS", "false"))
+	if err != nil {
+		return nil, errors.New("LLMUX_REQUIRE_CLIENT_KEYS must be a boolean (true/false)")
+	}
+	if required && len(keys) == 0 {
+		return nil, errors.New("LLMUX_REQUIRE_CLIENT_KEYS is true but LLMUX_CLIENT_KEYS is empty")
+	}
+	return keys, nil
+}
+
+// validClientKey restricts keys to a URL- and list-safe alphabet: a key
+// containing "," or "=" would otherwise be silently split into another entry.
+func validClientKey(s string) bool {
+	for _, r := range s {
+		if (r < 'a' || r > 'z') && (r < 'A' || r > 'Z') && (r < '0' || r > '9') && r != '-' && r != '_' {
+			return false
+		}
+	}
+	return true
+}
+
+func validClientName(s string) bool {
+	for _, r := range s {
+		if (r < 'a' || r > 'z') && (r < '0' || r > '9') && r != '-' {
+			return false
+		}
+	}
+	return true
 }
