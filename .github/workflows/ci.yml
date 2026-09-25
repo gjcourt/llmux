@@ -30,7 +30,10 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-go@v7
         with:
-          go-version-file: go.mod
+          # Not go.mod's version: go-arch-lint v1.18 needs Go >= 1.25 to
+          # install, and this module targets 1.24. The guard only reads the
+          # import graph, so a newer toolchain is safe here.
+          go-version: stable
           cache: true
       - name: Install go-arch-lint
         run: go install github.com/fe3dback/go-arch-lint@v1.18.0
