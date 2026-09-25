@@ -121,3 +121,79 @@ func TestE2E_AnthropicRejectsToolsAndImages(t *testing.T) {
 		}
 	}
 }
+
+// fakeAnthropic answers every request with status, headers and body.
+func fakeAnthropic(t *testing.T, h http.HandlerFunc) *httptest.Server {
+	t.Helper()
+	up := httptest.NewServer(h)
+	t.Cleanup(up.Close)
+	p := anthropic.New(anthropic.Config{APIKey: "k", BaseURL: up.URL, Models: []string{"claude-sonnet-5"}})
+	srv := httptest.NewServer(httpapi.New(app.New(p)))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+const streamReq = `{"model":"claude-sonnet-5","stream":true,"messages":[{"role":"user","content":"x"}]}`
+
+// llmux's own bad key is not the client's problem: 401/403 become 502. 529
+// becomes a retryable 503. Retry-After survives.
+func TestE2E_AnthropicStatusMapping(t *testing.T) {
+	for upstream, want := range map[int]int{401: 502, 403: 502, 429: 429, 529: 503, 400: 400} {
+		srv := fakeAnthropic(t, func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("Retry-After", "9")
+			w.WriteHeader(upstream)
+			w.Write([]byte(`{"type":"error","error":{"type":"x","message":"y"}}`)) //nolint:errcheck
+		})
+		resp, body := post(t, srv, streamReq)
+		if resp.StatusCode != want || resp.Header.Get("Retry-After") != "9" || !strings.Contains(body, `"message":"y"`) {
+			t.Errorf("upstream %d: got %d, Retry-After %q, body %s", upstream, resp.StatusCode, resp.Header.Get("Retry-After"), body)
+		}
+	}
+}
+
+func TestE2E_AnthropicOverloadedBeforeStartIs503(t *testing.T) {
+	srv := fakeAnthropic(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Write([]byte("event: error\ndata: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"Overloaded\"}}\n\n")) //nolint:errcheck
+	})
+	resp, body := post(t, srv, streamReq)
+	if resp.StatusCode != 503 || !strings.Contains(body, "Overloaded") {
+		t.Errorf("got %d %s", resp.StatusCode, body)
+	}
+}
+
+// After output has started, an upstream error ends the stream with an error
+// chunk and [DONE] — never silently, never as a clean finish.
+func TestE2E_AnthropicMidStreamErrorChunk(t *testing.T) {
+	srv := fakeAnthropic(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		for _, ev := range []string{
+			`{"type":"message_start","message":{"id":"m","model":"claude-sonnet-5","usage":{"input_tokens":1}}}`,
+			`{"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}`,
+			`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"partial"}}`,
+			`{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}`,
+		} {
+			w.Write([]byte("data: " + ev + "\n\n")) //nolint:errcheck
+		}
+	})
+	resp, body := post(t, srv, streamReq)
+	if resp.StatusCode != 200 {
+		t.Fatalf("status %d", resp.StatusCode)
+	}
+	chunks, done := sseEvents(t, body)
+	if !done {
+		t.Error("stream must still end with [DONE]")
+	}
+	last := chunks[len(chunks)-1]
+	if last.Error == nil || !strings.Contains(last.Error.Message, "Overloaded") {
+		t.Errorf("last chunk must be the error: %+v", last)
+	}
+	for _, c := range chunks {
+		for _, ch := range c.Choices {
+			if ch.FinishReason != nil {
+				t.Errorf("an errored stream must not carry a finish_reason: %+v", c)
+			}
+		}
+	}
+}

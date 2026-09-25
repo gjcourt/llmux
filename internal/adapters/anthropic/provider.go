@@ -8,8 +8,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"slices"
 	"strings"
@@ -25,10 +27,11 @@ const APIVersion = "2023-06-01"
 // Config configures the provider.
 type Config struct {
 	APIKey           string
-	BaseURL          string   // default https://api.anthropic.com
-	Models           []string // model ids this provider serves and lists
-	DefaultMaxTokens int      // used when the request sets none; Anthropic requires one
-	Client           *http.Client
+	BaseURL          string           // default https://api.anthropic.com
+	Models           []string         // model ids this provider serves and lists
+	DefaultMaxTokens int              // used when the request sets none; Anthropic requires one
+	Client           *http.Client     // default HTTPClient()
+	IdleTimeout      time.Duration    // cancel after this long with no bytes; default 90s
 	Now              func() time.Time // for tests
 }
 
@@ -49,7 +52,10 @@ func New(cfg Config) *Provider {
 		cfg.DefaultMaxTokens = 8192
 	}
 	if cfg.Client == nil {
-		cfg.Client = http.DefaultClient
+		cfg.Client = HTTPClient()
+	}
+	if cfg.IdleTimeout <= 0 {
+		cfg.IdleTimeout = 90 * time.Second
 	}
 	if cfg.Now == nil {
 		cfg.Now = time.Now
@@ -76,6 +82,8 @@ func (p *Provider) Models(context.Context) ([]domain.Model, error) {
 // the inbound adapter assembles a single JSON response when the client asked
 // for one.
 func (p *Provider) Chat(ctx context.Context, req domain.ChatRequest, sink domain.EventSink) error {
+	ctx, cancel := context.WithCancelCause(ctx)
+	defer cancel(nil)
 	body, err := buildRequest(req, p.cfg.DefaultMaxTokens)
 	if err != nil {
 		return err
@@ -105,7 +113,60 @@ func (p *Provider) Chat(ctx context.Context, req domain.ChatRequest, sink domain
 
 	if resp.StatusCode >= 300 {
 		raw, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
-		return &domain.UpstreamError{Status: resp.StatusCode, ContentType: resp.Header.Get("Content-Type"), Body: raw}
+		return &domain.UpstreamError{Status: resp.StatusCode, ContentType: resp.Header.Get("Content-Type"), Body: raw, RetryAfter: resp.Header.Get("Retry-After")}
 	}
-	return parseStream(resp.Body, sink, p.cfg.Now().Unix())
+	stream := newIdleReader(resp.Body, p.cfg.IdleTimeout, cancel)
+	defer stream.stop()
+	err = parseStream(stream, sink, p.cfg.Now().Unix())
+	if err != nil && errors.Is(context.Cause(ctx), errIdle) {
+		return fmt.Errorf("anthropic stream: %w", errIdle)
+	}
+	return err
+}
+
+// errIdle is the cause when the upstream stream goes silent. It is distinct
+// from context.Canceled, which the handler reads as "the client went away".
+var errIdle = errors.New("no data from upstream within the idle timeout")
+
+// idleReader cancels the request when no bytes arrive for d. Anthropic sends
+// ping events while it works (including during web searches), so silence
+// means a stalled connection, which would otherwise hold the client's
+// request open indefinitely — there is deliberately no overall timeout.
+type idleReader struct {
+	r     io.Reader
+	d     time.Duration
+	timer *time.Timer
+}
+
+func newIdleReader(r io.Reader, d time.Duration, cancel context.CancelCauseFunc) *idleReader {
+	return &idleReader{r: r, d: d, timer: time.AfterFunc(d, func() { cancel(errIdle) })}
+}
+
+func (ir *idleReader) Read(p []byte) (int, error) {
+	n, err := ir.r.Read(p)
+	if n > 0 {
+		ir.timer.Reset(ir.d)
+	}
+	return n, err
+}
+
+func (ir *idleReader) stop() { ir.timer.Stop() }
+
+// HTTPClient returns the client the provider should use in production: no
+// overall timeout (answers stream as long as they take; the caller's context
+// and the idle timeout end them), bounded dial and header waits, and no
+// redirects — Go strips Authorization on a cross-host redirect but not
+// x-api-key, so following one could hand the key to another host. A 3xx is
+// relayed as an upstream error instead.
+func HTTPClient() *http.Client {
+	return &http.Client{
+		Transport: &http.Transport{
+			Proxy:                 http.ProxyFromEnvironment,
+			DialContext:           (&net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+			TLSHandshakeTimeout:   10 * time.Second,
+			ResponseHeaderTimeout: 60 * time.Second,
+			IdleConnTimeout:       90 * time.Second,
+		},
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}
 }

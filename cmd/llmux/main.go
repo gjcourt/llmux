@@ -88,15 +88,7 @@ func providersFromEnv() ([]outbound.ChatProvider, error) {
 			BaseURL:          envOr("LLMUX_ANTHROPIC_URL", "https://api.anthropic.com"),
 			Models:           models,
 			DefaultMaxTokens: maxTokens,
-			// No overall timeout: answers stream for as long as they take, and
-			// the client's context cancels the upstream call. Headers must
-			// still arrive promptly.
-			Client: &http.Client{Transport: &http.Transport{
-				Proxy:                 http.ProxyFromEnvironment,
-				ResponseHeaderTimeout: 60 * time.Second,
-				TLSHandshakeTimeout:   10 * time.Second,
-				IdleConnTimeout:       90 * time.Second,
-			}},
+			Client:           anthropic.HTTPClient(),
 		}))
 		slog.Info("anthropic provider enabled", "models", models)
 	}

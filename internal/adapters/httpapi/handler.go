@@ -84,7 +84,8 @@ func (h *Handler) chat(w http.ResponseWriter, r *http.Request) {
 }
 
 // writeChatError maps a service error to an HTTP response. An upstream's own
-// error response is relayed with its original status and body.
+// error response is relayed with its body and, mostly, its status; see
+// clientStatus.
 func writeChatError(w http.ResponseWriter, err error) {
 	var ue *domain.UpstreamError
 	var ie *domain.InvalidRequestError
@@ -97,7 +98,10 @@ func writeChatError(w http.ResponseWriter, err error) {
 			ct = "application/json"
 		}
 		w.Header().Set("Content-Type", ct)
-		w.WriteHeader(ue.Status)
+		if ue.RetryAfter != "" {
+			w.Header().Set("Retry-After", ue.RetryAfter)
+		}
+		w.WriteHeader(clientStatus(ue.Status))
 		w.Write(ue.Body) //nolint:errcheck
 	case errors.Is(err, domain.ErrNoProvider):
 		writeError(w, http.StatusNotFound, err.Error())
@@ -109,6 +113,20 @@ func writeChatError(w http.ResponseWriter, err error) {
 		slog.Error("chat failed", "err", err)
 		writeError(w, http.StatusBadGateway, err.Error())
 	}
+}
+
+// clientStatus is the status a client sees for an upstream's. Auth failures
+// are llmux's own credentials, not the client's, so they become 502 rather
+// than telling the client to re-authenticate. Anthropic's non-standard 529
+// (overloaded) becomes 503, which clients know to retry.
+func clientStatus(upstream int) int {
+	switch upstream {
+	case http.StatusUnauthorized, http.StatusForbidden:
+		return http.StatusBadGateway
+	case 529:
+		return http.StatusServiceUnavailable
+	}
+	return upstream
 }
 
 func writeError(w http.ResponseWriter, status int, msg string) {

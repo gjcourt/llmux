@@ -106,3 +106,17 @@ func TestBuildRequest_Rejects(t *testing.T) {
 		}
 	}
 }
+
+// Measured: claude-haiku-4-5 400s on a final assistant turn ending in
+// whitespace. Earlier assistant turns are left alone.
+func TestBuildRequest_TrimsTrailingPrefillWhitespace(t *testing.T) {
+	got, err := buildRequest(domain.ChatRequest{Model: "m", Messages: []domain.Message{
+		user("a"), {Role: "assistant", Content: "keep  "}, user("b"), {Role: "assistant", Content: "The colour is \n"},
+	}}, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Messages[1].Content != "keep  " || got.Messages[3].Content != "The colour is" {
+		t.Errorf("messages: %+v", got.Messages)
+	}
+}

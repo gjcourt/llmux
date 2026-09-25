@@ -139,6 +139,7 @@ type UpstreamError struct {
 	Status      int
 	ContentType string
 	Body        []byte
+	RetryAfter  string // the upstream's Retry-After header, if any
 }
 
 func (e *UpstreamError) Error() string {

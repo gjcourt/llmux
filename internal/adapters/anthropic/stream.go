@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
 	"strings"
 
 	"github.com/gjcourt/llmux/internal/domain"
@@ -53,6 +54,20 @@ type StreamError struct {
 
 func (e *StreamError) Error() string { return "anthropic " + e.Type + ": " + e.Message }
 
+// errorStatus is the HTTP status for an in-stream error type, matching what
+// the API returns for the same error as a response status.
+func errorStatus(errType string) int {
+	switch errType {
+	case "overloaded_error":
+		return 529
+	case "rate_limit_error":
+		return http.StatusTooManyRequests
+	case "api_error":
+		return http.StatusInternalServerError
+	}
+	return http.StatusBadGateway
+}
+
 // finishReason maps an Anthropic stop_reason to OpenAI's finish_reason.
 func finishReason(stop string) string {
 	switch stop {
@@ -83,6 +98,7 @@ func parseStream(r io.Reader, sink domain.EventSink, created int64) error {
 	sc.Buffer(make([]byte, 64*1024), 16<<20)
 
 	textBlocks := map[int]bool{}
+	started := false
 	var in, out apiUsage
 	stop := ""
 
@@ -102,6 +118,7 @@ func parseStream(r io.Reader, sink domain.EventSink, created int64) error {
 				return fmt.Errorf("message_start without message")
 			}
 			in = ev.Message.Usage
+			started = true
 			if err := sink.Emit(domain.Event{Kind: domain.EventStart, ID: ev.Message.ID, Model: ev.Message.Model, Created: created}); err != nil {
 				return err
 			}
@@ -151,6 +168,11 @@ func parseStream(r io.Reader, sink domain.EventSink, created int64) error {
 			se := &StreamError{Type: "error", Message: "unknown error"}
 			if ev.Error != nil {
 				se.Type, se.Message = ev.Error.Type, ev.Error.Message
+			}
+			if !started {
+				// Nothing has reached the client, so it can still get a real
+				// status — one that says whether retrying makes sense.
+				return &domain.UpstreamError{Status: errorStatus(se.Type), ContentType: "application/json", Body: []byte(strings.TrimSpace(line[len("data:"):]))}
 			}
 			return se
 

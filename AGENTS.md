@@ -49,7 +49,8 @@ client, and relays only text blocks: thinking and server-tool blocks are
 dropped, and nothing it emits is ever a tool call — Open WebUI would try to
 execute it. It always drops `temperature`/`top_p` (the Claude 5 family 400s
 on either) and rejects client tools, tool history and images with a 400
-rather than silently dropping them.
+rather than silently dropping them. Its HTTP client must never follow
+redirects (`anthropic.HTTPClient`): `x-api-key` survives a cross-host redirect.
 
 The vLLM/Ollama provider keeps the original behaviour: requests with tools go to
 vLLM, falling back to Ollama through `applyToolCallTransform`; plain chat goes to

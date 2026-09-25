@@ -79,6 +79,14 @@ func buildRequest(req domain.ChatRequest, defaultMaxTokens int) (messagesRequest
 	if len(out.Messages) == 0 {
 		return messagesRequest{}, &domain.InvalidRequestError{Msg: "request has no user or assistant messages"}
 	}
+	// A conversation ending in an assistant turn (Open WebUI's "continue
+	// response") is a prefill. Measured 2026-09-25: claude-haiku-4-5 rejects
+	// one ending in whitespace, so trim it; the Claude 5 family rejects
+	// prefill outright, and that 400 is relayed as-is — its message says
+	// exactly what's wrong.
+	if last := &out.Messages[len(out.Messages)-1]; last.Role == "assistant" {
+		last.Content = strings.TrimRight(last.Content, " \t\r\n")
+	}
 	out.System = strings.Join(system, "\n\n")
 
 	// Anthropic rejects whitespace-only stop sequences (HTTP 400).

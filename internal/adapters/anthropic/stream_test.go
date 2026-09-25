@@ -215,3 +215,30 @@ func TestParseStream_MalformedEvent(t *testing.T) {
 		t.Fatal("want error")
 	}
 }
+
+// An error event before message_start has reached nobody, so it becomes an
+// upstream error with a status that says whether to retry.
+func TestParseStream_ErrorBeforeStartIsStatus(t *testing.T) {
+	for typ, want := range map[string]int{"overloaded_error": 529, "rate_limit_error": 429, "api_error": 500, "other": 502} {
+		body := sse(`{"type":"error","error":{"type":"` + typ + `","message":"m"}}`)
+		err := parseStream(strings.NewReader(body), &recorder{}, 0)
+		var ue *domain.UpstreamError
+		if !errors.As(err, &ue) || ue.Status != want || !strings.Contains(string(ue.Body), typ) {
+			t.Errorf("%s: got %v", typ, err)
+		}
+	}
+}
+
+// Current API: message_delta carries the full cumulative usage, cache fields
+// included.
+func TestParseStream_CacheTokensFromMessageDelta(t *testing.T) {
+	body := sse(evStart, evText, evDelta,
+		`{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"input_tokens":50,"cache_creation_input_tokens":20,"cache_read_input_tokens":30,"output_tokens":7}}`, evStop)
+	rec := &recorder{}
+	if err := parseStream(strings.NewReader(body), rec, 0); err != nil {
+		t.Fatal(err)
+	}
+	if us := rec.kinds(domain.EventUsage); len(us) != 1 || us[0].Usage != (domain.Usage{PromptTokens: 100, CompletionTokens: 7, TotalTokens: 107}) {
+		t.Errorf("usage: %+v", us)
+	}
+}
