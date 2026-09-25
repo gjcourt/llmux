@@ -122,6 +122,75 @@ func TestE2E_AnthropicRejectsToolsAndImages(t *testing.T) {
 	}
 }
 
+// Citations reach the client as OpenAI url_citation annotations — what Open
+// WebUI renders as source chips — and never as tool_calls, which it would try
+// to execute.
+func TestE2E_AnthropicCitationsStream(t *testing.T) {
+	srv := anthropicStack(t, "websearch.sse", nil)
+	_, body := post(t, srv, `{"model":"claude-sonnet-5","stream":true,"messages":[{"role":"user","content":"latest open webui?"}]}`)
+	var urls []string
+	for line := range strings.SplitSeq(body, "\n") {
+		data, ok := strings.CutPrefix(line, "data: ")
+		if !ok || data == "[DONE]" {
+			continue
+		}
+		var c struct {
+			Choices []struct {
+				Delta map[string]json.RawMessage `json:"delta"`
+			} `json:"choices"`
+		}
+		if err := json.Unmarshal([]byte(data), &c); err != nil {
+			t.Fatal(err)
+		}
+		for _, ch := range c.Choices {
+			if _, bad := ch.Delta["tool_calls"]; bad {
+				t.Fatalf("tool_calls emitted: %s", data)
+			}
+			if raw, ok := ch.Delta["annotations"]; ok {
+				var anns []struct {
+					Type        string `json:"type"`
+					URLCitation struct {
+						URL   string `json:"url"`
+						Title string `json:"title"`
+					} `json:"url_citation"`
+				}
+				if err := json.Unmarshal(raw, &anns); err != nil {
+					t.Fatal(err)
+				}
+				for _, a := range anns {
+					if a.Type != "url_citation" || a.URLCitation.URL == "" {
+						t.Errorf("bad annotation: %s", raw)
+					}
+					urls = append(urls, a.URLCitation.URL)
+				}
+			}
+		}
+	}
+	if len(urls) == 0 {
+		t.Fatal("no url_citation annotations in the stream")
+	}
+}
+
+func TestE2E_AnthropicCitationsNonStream(t *testing.T) {
+	srv := anthropicStack(t, "websearch.sse", nil)
+	_, body := post(t, srv, `{"model":"claude-sonnet-5","messages":[{"role":"user","content":"latest open webui?"}]}`)
+	var out struct {
+		Choices []struct {
+			Message struct {
+				Annotations []struct {
+					Type string `json:"type"`
+				} `json:"annotations"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal([]byte(body), &out); err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Choices[0].Message.Annotations) == 0 || out.Choices[0].Message.Annotations[0].Type != "url_citation" {
+		t.Errorf("want url_citation annotations on the message: %s", body)
+	}
+}
+
 // fakeAnthropic answers every request with status, headers and body.
 func fakeAnthropic(t *testing.T, h http.HandlerFunc) *httptest.Server {
 	t.Helper()
@@ -195,5 +264,63 @@ func TestE2E_AnthropicMidStreamErrorChunk(t *testing.T) {
 				t.Errorf("an errored stream must not carry a finish_reason: %+v", c)
 			}
 		}
+	}
+}
+
+// A resume that fails with 429: a JSON client has received nothing, so it
+// gets the 429 and Retry-After; a streaming client gets an error chunk.
+func TestE2E_AnthropicFailedResume(t *testing.T) {
+	paused := "data: " + strings.Join([]string{
+		`{"type":"message_start","message":{"id":"m","model":"claude-sonnet-5","usage":{"input_tokens":1}}}`,
+		`{"type":"content_block_start","index":0,"content_block":{"type":"server_tool_use","id":"s","name":"web_search","input":{}}}`,
+		`{"type":"content_block_stop","index":0}`,
+		`{"type":"message_delta","delta":{"stop_reason":"pause_turn"},"usage":{"output_tokens":1}}`,
+		`{"type":"message_stop"}`,
+	}, "\n\ndata: ") + "\n\n"
+	newSrv := func() *httptest.Server {
+		calls := 0
+		return fakeAnthropic(t, func(w http.ResponseWriter, _ *http.Request) {
+			calls++
+			if calls%2 == 1 {
+				w.Header().Set("Content-Type", "text/event-stream")
+				w.Write([]byte(paused)) //nolint:errcheck
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			w.Header().Set("Retry-After", "7")
+			w.WriteHeader(http.StatusTooManyRequests)
+			w.Write([]byte(`{"type":"error","error":{"type":"rate_limit_error","message":"slow down"}}`)) //nolint:errcheck
+		})
+	}
+	resp, body := post(t, newSrv(), `{"model":"claude-sonnet-5","messages":[{"role":"user","content":"x"}]}`)
+	if resp.StatusCode != 429 || resp.Header.Get("Retry-After") != "7" || !strings.Contains(body, "slow down") {
+		t.Errorf("json: %d %q %s", resp.StatusCode, resp.Header.Get("Retry-After"), body)
+	}
+	resp, body = post(t, newSrv(), streamReq)
+	chunks, done := sseEvents(t, body)
+	if resp.StatusCode != 200 || !done || chunks[len(chunks)-1].Error == nil || !strings.Contains(chunks[len(chunks)-1].Error.Message, "slow down") {
+		t.Errorf("stream: %d %s", resp.StatusCode, body)
+	}
+}
+
+// An overloaded error event after message_start: a JSON client has received
+// nothing, so it still gets the retryable 503; a streaming client gets an
+// error chunk.
+func TestE2E_AnthropicErrorEventAfterStart(t *testing.T) {
+	newSrv := func() *httptest.Server {
+		return fakeAnthropic(t, func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.Write([]byte("data: {\"type\":\"message_start\",\"message\":{\"id\":\"m\",\"model\":\"claude-sonnet-5\",\"usage\":{\"input_tokens\":1}}}\n\n" + //nolint:errcheck
+				"data: {\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"Overloaded\"}}\n\n"))
+		})
+	}
+	resp, body := post(t, newSrv(), `{"model":"claude-sonnet-5","messages":[{"role":"user","content":"x"}]}`)
+	if resp.StatusCode != 503 || !strings.Contains(body, "Overloaded") {
+		t.Errorf("json: %d %s", resp.StatusCode, body)
+	}
+	resp, body = post(t, newSrv(), streamReq)
+	chunks, done := sseEvents(t, body)
+	if resp.StatusCode != 200 || !done || chunks[len(chunks)-1].Error == nil {
+		t.Errorf("stream: %d %s", resp.StatusCode, body)
 	}
 }

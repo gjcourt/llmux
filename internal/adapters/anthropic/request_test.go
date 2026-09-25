@@ -27,7 +27,7 @@ func TestBuildRequest_Basic(t *testing.T) {
 		MaxTokens: ptr(100),
 		Stop:      []string{"END", "  ", ""},
 	}
-	got, err := buildRequest(req, 8192)
+	got, err := buildRequest(req, 8192, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -50,7 +50,7 @@ func TestBuildRequest_Basic(t *testing.T) {
 
 func TestBuildRequest_DefaultMaxTokens(t *testing.T) {
 	for _, mt := range []*int{nil, ptr(0), ptr(-1)} {
-		got, err := buildRequest(domain.ChatRequest{Model: "m", Messages: []domain.Message{user("x")}, MaxTokens: mt}, 8192)
+		got, err := buildRequest(domain.ChatRequest{Model: "m", Messages: []domain.Message{user("x")}, MaxTokens: mt}, 8192, 0)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -63,7 +63,7 @@ func TestBuildRequest_DefaultMaxTokens(t *testing.T) {
 // The Claude 5 family rejects temperature and top_p with a 400, so they are
 // never sent. Pinned on the wire, not just the struct.
 func TestBuildRequest_DropsSampling(t *testing.T) {
-	got, err := buildRequest(domain.ChatRequest{Model: "m", Messages: []domain.Message{user("x")}, Temperature: ptr(0.2), TopP: ptr(0.9)}, 10)
+	got, err := buildRequest(domain.ChatRequest{Model: "m", Messages: []domain.Message{user("x")}, Temperature: ptr(0.2), TopP: ptr(0.9)}, 10, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -76,7 +76,7 @@ func TestBuildRequest_DropsSampling(t *testing.T) {
 func TestBuildRequest_SkipsEmptyAssistantAndSystem(t *testing.T) {
 	got, err := buildRequest(domain.ChatRequest{Model: "m", Messages: []domain.Message{
 		{Role: "system", Content: "  "}, user("a"), {Role: "assistant", Content: ""}, user("b"),
-	}}, 10)
+	}}, 10, 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -99,7 +99,7 @@ func TestBuildRequest_Rejects(t *testing.T) {
 	}
 	for name, req := range cases {
 		req.Model = "m"
-		_, err := buildRequest(req, 10)
+		_, err := buildRequest(req, 10, 0)
 		var ire *domain.InvalidRequestError
 		if !errors.As(err, &ire) {
 			t.Errorf("%s: want InvalidRequestError, got %v", name, err)
@@ -112,7 +112,7 @@ func TestBuildRequest_Rejects(t *testing.T) {
 func TestBuildRequest_TrimsTrailingPrefillWhitespace(t *testing.T) {
 	got, err := buildRequest(domain.ChatRequest{Model: "m", Messages: []domain.Message{
 		user("a"), {Role: "assistant", Content: "keep  "}, user("b"), {Role: "assistant", Content: "The colour is \u00a0\n"},
-	}}, 10)
+	}}, 10, 0)
 	if err != nil {
 		t.Fatal(err)
 	}

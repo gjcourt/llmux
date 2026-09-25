@@ -82,15 +82,20 @@ func providersFromEnv() ([]outbound.ChatProvider, error) {
 		if err != nil || maxTokens <= 0 {
 			return nil, errors.New("LLMUX_ANTHROPIC_MAX_TOKENS must be a positive integer")
 		}
+		searches, err := strconv.Atoi(envOr("LLMUX_WEB_SEARCH_MAX_USES", "3"))
+		if err != nil || searches < 0 {
+			return nil, errors.New("LLMUX_WEB_SEARCH_MAX_USES must be a non-negative integer (0 disables web search)")
+		}
 		models := splitList(envOr("LLMUX_ANTHROPIC_MODELS", "claude-sonnet-5,claude-opus-5,claude-haiku-4-5"))
 		providers = append(providers, anthropic.New(anthropic.Config{
 			APIKey:           key,
 			BaseURL:          envOr("LLMUX_ANTHROPIC_URL", "https://api.anthropic.com"),
 			Models:           models,
 			DefaultMaxTokens: maxTokens,
+			WebSearchMaxUses: searches,
 			Client:           anthropic.HTTPClient(),
 		}))
-		slog.Info("anthropic provider enabled", "models", models)
+		slog.Info("anthropic provider enabled", "models", models, "web_search_max_uses", searches)
 	}
 
 	// Both backends left with the homelab GPUs, so they now default to off.

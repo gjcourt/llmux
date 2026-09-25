@@ -1,6 +1,7 @@
 package anthropic
 
 import (
+	"encoding/json"
 	"errors"
 	"io"
 	"os"
@@ -137,7 +138,7 @@ func TestParseStream_CacheTokensCountAsPrompt(t *testing.T) {
 
 func TestParseStream_FinishReasons(t *testing.T) {
 	cases := map[string]string{
-		"end_turn": "stop", "stop_sequence": "stop", "pause_turn": "stop",
+		"end_turn": "stop", "stop_sequence": "stop", "pause_turn": "length",
 		"max_tokens": "length", "refusal": "content_filter", "tool_use": "tool_calls",
 	}
 	for stop, want := range cases {
@@ -216,6 +217,106 @@ func TestParseStream_MalformedEvent(t *testing.T) {
 	}
 }
 
+// The captured web-search stream cites one source twice; it is reported once.
+func TestParseStream_Citations(t *testing.T) {
+	rec := parseFixture(t, "websearch.sse")
+	cites := rec.kinds(domain.EventCitation)
+	if len(cites) == 0 {
+		t.Fatal("want citations from the web search fixture")
+	}
+	seen := map[string]bool{}
+	for _, c := range cites {
+		if c.Citation.URL == "" || !strings.HasPrefix(c.Citation.URL, "https://") {
+			t.Errorf("citation without a URL: %+v", c.Citation)
+		}
+		if seen[c.Citation.URL] {
+			t.Errorf("citation repeated: %s", c.Citation.URL)
+		}
+		seen[c.Citation.URL] = true
+	}
+	if len(cites) != 1 {
+		t.Errorf("want 1 deduped citation, got %d", len(cites))
+	}
+	if rec.events[0].Kind != domain.EventStart {
+		t.Error("Start must come first")
+	}
+}
+
+const evCite = `{"type":"content_block_delta","index":0,"delta":{"type":"citations_delta","citation":{"type":"web_search_result_location","url":"https://a.example/x","title":"A","cited_text":"...","encrypted_index":"E1"}}}`
+
+func TestParseStream_CitationDedupedByURL(t *testing.T) {
+	body := sse(evStart, evText, evCite, evDelta, evCite,
+		`{"type":"content_block_delta","index":0,"delta":{"type":"citations_delta","citation":{"type":"web_search_result_location","url":"https://b.example/","title":""}}}`,
+		`{"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":1}}`, evStop)
+	rec := &recorder{}
+	if err := parseStream(strings.NewReader(body), rec, 0); err != nil {
+		t.Fatal(err)
+	}
+	cites := rec.kinds(domain.EventCitation)
+	if len(cites) != 2 || cites[0].Citation != (domain.Citation{URL: "https://a.example/x", Title: "A"}) || cites[1].Citation.URL != "https://b.example/" {
+		t.Errorf("citations: %+v", cites)
+	}
+}
+
+// A paused turn's blocks must round-trip exactly what the API needs to
+// resume: text with its citations, thinking with its signature, and the
+// server tool's input assembled from its JSON deltas.
+func TestParseTurn_AccumulatesBlocks(t *testing.T) {
+	body := sse(evStart,
+		`{"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":"","signature":""}}`,
+		`{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"let me "}}`,
+		`{"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"search"}}`,
+		`{"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"SIG"}}`,
+		`{"type":"content_block_stop","index":0}`,
+		`{"type":"content_block_start","index":1,"content_block":{"type":"server_tool_use","id":"srvtoolu_1","name":"web_search","input":{}}}`,
+		`{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"query\": "}}`,
+		`{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"\"go 1.26\"}"}}`,
+		`{"type":"content_block_stop","index":1}`,
+		`{"type":"content_block_start","index":2,"content_block":{"type":"web_search_tool_result","tool_use_id":"srvtoolu_1","content":[{"type":"web_search_result","url":"https://go.dev","title":"Go","encrypted_content":"ENC"}]}}`,
+		`{"type":"content_block_stop","index":2}`,
+		`{"type":"content_block_start","index":3,"content_block":{"citations":[],"type":"text","text":""}}`,
+		`{"type":"content_block_delta","index":3,"delta":{"type":"citations_delta","citation":{"type":"web_search_result_location","url":"https://go.dev","title":"Go","encrypted_index":"EI"}}}`,
+		`{"type":"content_block_delta","index":3,"delta":{"type":"text_delta","text":"Go 1.26 is out."}}`,
+		`{"type":"content_block_stop","index":3}`,
+		`{"type":"message_delta","delta":{"stop_reason":"pause_turn"},"usage":{"output_tokens":9}}`, evStop)
+	st := newStreamState(0)
+	rec := &recorder{}
+	tr, err := st.parseTurn(strings.NewReader(body), rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tr.stopReason != "pause_turn" || len(tr.blocks) != 4 {
+		t.Fatalf("turn: %s, %d blocks", tr.stopReason, len(tr.blocks))
+	}
+	want := []string{
+		`{"signature":"SIG","thinking":"let me search","type":"thinking"}`,
+		`{"id":"srvtoolu_1","input":{"query":"go 1.26"},"name":"web_search","type":"server_tool_use"}`,
+		`{"content":[{"encrypted_content":"ENC","title":"Go","type":"web_search_result","url":"https://go.dev"}],"tool_use_id":"srvtoolu_1","type":"web_search_tool_result"}`,
+		`{"citations":[{"type":"web_search_result_location","url":"https://go.dev","title":"Go","encrypted_index":"EI"}],"text":"Go 1.26 is out.","type":"text"}`,
+	}
+	for i, w := range want {
+		if string(tr.blocks[i]) != w {
+			t.Errorf("block %d:\n got %s\nwant %s", i, tr.blocks[i], w)
+		}
+	}
+	if rec.text() != "Go 1.26 is out." {
+		t.Errorf("text: %q", rec.text())
+	}
+	if len(rec.kinds(domain.EventFinish)) != 0 {
+		t.Error("parseTurn must leave Finish to the caller")
+	}
+}
+
+func TestParseTurn_InvalidToolInput(t *testing.T) {
+	body := sse(evStart,
+		`{"type":"content_block_start","index":0,"content_block":{"type":"server_tool_use","id":"s","name":"web_search","input":{}}}`,
+		`{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\"query\": "}}`,
+		`{"type":"content_block_stop","index":0}`, evStop)
+	if _, err := newStreamState(0).parseTurn(strings.NewReader(body), &recorder{}); err == nil {
+		t.Fatal("want error for truncated tool input")
+	}
+}
+
 // An error event before message_start has reached nobody, so it becomes an
 // upstream error with a status that says whether to retry.
 func TestParseStream_ErrorBeforeStartIsStatus(t *testing.T) {
@@ -240,5 +341,59 @@ func TestParseStream_CacheTokensFromMessageDelta(t *testing.T) {
 	}
 	if us := rec.kinds(domain.EventUsage); len(us) != 1 || us[0].Usage != (domain.Usage{PromptTokens: 100, CompletionTokens: 7, TotalTokens: 107}) {
 		t.Errorf("usage: %+v", us)
+	}
+}
+
+// On the real capture, every replayed block equals what the API sent, with
+// the deltas folded in: results and tool-use starts unchanged apart from the
+// rebuilt input, thinking keeping its signature, text keeping citations.
+func TestParseTurn_RealCaptureRoundTrip(t *testing.T) {
+	f, err := os.Open("testdata/websearch.sse")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer f.Close()
+	tr, err := newStreamState(0).parseTurn(f, &recorder{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tr.lossy {
+		t.Error("the real capture must not be lossy")
+	}
+	types := []string{}
+	for _, raw := range tr.blocks {
+		var b map[string]any
+		if err := json.Unmarshal(raw, &b); err != nil {
+			t.Fatal(err)
+		}
+		typ, _ := b["type"].(string)
+		types = append(types, typ)
+		switch typ {
+		case "thinking":
+			if sig, _ := b["signature"].(string); len(sig) < 100 {
+				t.Errorf("thinking lost its signature: %q", sig)
+			}
+		case "server_tool_use":
+			in, _ := b["input"].(map[string]any)
+			if q, _ := in["query"].(string); q == "" {
+				t.Errorf("tool input not rebuilt: %v", b["input"])
+			}
+		case "web_search_tool_result":
+			if c, _ := b["content"].([]any); len(c) == 0 {
+				t.Error("search results lost")
+			}
+		}
+	}
+	if len(types) != 11 || types[0] != "thinking" || types[1] != "server_tool_use" || types[2] != "web_search_tool_result" {
+		t.Errorf("block order: %v", types)
+	}
+	var cited int
+	for _, raw := range tr.blocks {
+		if strings.Contains(string(raw), "encrypted_index") {
+			cited++
+		}
+	}
+	if cited == 0 {
+		t.Error("text citations (with encrypted_index) must be kept for replay")
 	}
 }
