@@ -155,3 +155,37 @@ func TestBuildRequest_DropClientTools(t *testing.T) {
 		t.Errorf("only llmux's own web search may be sent, got %s", tb)
 	}
 }
+
+// Drop-mode edge cases: a history ending in a tool result (llmux never
+// returns tool calls, but a client could replay one) reduces to the user's
+// question; a history whose first surviving turn is the assistant's is
+// passed as-is — the API accepts an assistant-first conversation (measured
+// 2026-09-25).
+func TestBuildRequest_DropClientTools_Edges(t *testing.T) {
+	endsInTool := domain.ChatRequest{Model: "m", Messages: []domain.Message{
+		user("what time is it?"),
+		{Role: "assistant", ToolCalls: []domain.ToolCall{{ID: "c", Name: "get_current_timestamp"}}},
+		{Role: "tool", ToolCallID: "c", Content: "15:00"},
+	}}
+	got, err := buildRequest(endsInTool, 10, 0, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := json.Marshal(got.Messages); string(b) != `[{"role":"user","content":"what time is it?"}]` {
+		t.Errorf("ends in tool result: %s", b)
+	}
+
+	assistantFirst := domain.ChatRequest{Model: "m", Messages: []domain.Message{
+		{Role: "assistant", ToolCalls: []domain.ToolCall{{ID: "c", Name: "get_current_timestamp"}}},
+		{Role: "tool", ToolCallID: "c", Content: "15:00"},
+		{Role: "assistant", Content: "Hi! It's 3pm."},
+		user("thanks"),
+	}}
+	got, err = buildRequest(assistantFirst, 10, 0, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := json.Marshal(got.Messages); string(b) != `[{"role":"assistant","content":"Hi! It's 3pm."},{"role":"user","content":"thanks"}]` {
+		t.Errorf("assistant first: %s", b)
+	}
+}
