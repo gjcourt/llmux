@@ -141,7 +141,7 @@ func providersFromEnv() ([]outbound.ChatProvider, error) {
 		}
 		streamOnly, err := strconv.ParseBool(envOr("LLMUX_WEB_SEARCH_STREAM_ONLY", "true"))
 		if err != nil {
-			return nil, errors.New("LLMUX_WEB_SEARCH_STREAM_ONLY must be true or false")
+			return nil, errors.New("LLMUX_WEB_SEARCH_STREAM_ONLY must be a boolean (true/false)")
 		}
 		models := splitList(envOr("LLMUX_ANTHROPIC_MODELS", "claude-sonnet-5,claude-opus-5,claude-haiku-4-5"))
 		providers = append(providers, anthropic.New(anthropic.Config{

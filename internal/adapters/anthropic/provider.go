@@ -98,7 +98,10 @@ func (p *Provider) Models(context.Context) ([]domain.Model, error) {
 // the same response.
 func (p *Provider) Chat(ctx context.Context, req domain.ChatRequest, sink domain.EventSink) error {
 	searches := p.cfg.WebSearchMaxUses
-	if p.cfg.WebSearchStreamOnly && !req.Stream {
+	if p.cfg.WebSearchStreamOnly && !req.Stream && searches > 0 {
+		// Applies to every non-streaming client, not only Open WebUI's
+		// background calls: llmux can't tell who is asking.
+		slog.Debug("web search not offered: non-streamed request and LLMUX_WEB_SEARCH_STREAM_ONLY is on", "model", req.Model)
 		searches = 0
 	}
 	body, err := buildRequest(req, p.cfg.DefaultMaxTokens, searches)
