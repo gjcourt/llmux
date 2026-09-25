@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -56,23 +57,41 @@ func run() error {
 	}
 
 	srv := &http.Server{
-		Addr:              addr,
 		Handler:           httpapi.New(app.New(providers...)),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	go func() {
-		<-ctx.Done()
-		shutdown, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		_ = srv.Shutdown(shutdown)
-	}()
 
-	slog.Info("llmux listening", "addr", addr, "providers", len(providers))
-	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
 		return err
 	}
+	slog.Info("llmux listening", "addr", ln.Addr().String(), "providers", len(providers))
+	return serve(ctx, srv, ln, 25*time.Second)
+}
+
+// serve runs srv on ln until ctx is done, then drains in-flight requests for
+// up to grace. Serve returns ErrServerClosed the moment Shutdown *starts*, so
+// serve waits for Shutdown to *finish* — otherwise the process would exit
+// mid-stream. The 25s grace sits under Kubernetes' default 30s.
+func serve(ctx context.Context, srv *http.Server, ln net.Listener, grace time.Duration) error {
+	drained := make(chan struct{})
+	go func() {
+		defer close(drained)
+		<-ctx.Done()
+		slog.Info("shutting down, draining in-flight requests")
+		shutdown, cancel := context.WithTimeout(context.Background(), grace)
+		defer cancel()
+		if err := srv.Shutdown(shutdown); err != nil {
+			slog.Warn("shutdown did not drain cleanly", "err", err)
+		}
+	}()
+
+	if err := srv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		return err
+	}
+	<-drained
 	return nil
 }

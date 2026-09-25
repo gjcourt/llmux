@@ -333,3 +333,75 @@ func TestE2E_HealthzWithNoProviders(t *testing.T) {
 	}
 	resp.Body.Close()
 }
+
+// Critique pass 1, finding 4: a non-streamed vLLM answer with a text preamble
+// and tool calls must keep both, and a plain empty answer is "" not null.
+func TestE2E_NonStreamPreambleWithToolCallsKeepsBoth(t *testing.T) {
+	vllm := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"id":"c","object":"chat.completion","model":"m","choices":[{"index":0,"message":{"role":"assistant","content":"Let me check.","tool_calls":[{"id":"t1","type":"function","function":{"name":"f","arguments":"{}"}}]},"finish_reason":"tool_calls"}]}`)) //nolint:errcheck
+	}))
+	defer vllm.Close()
+	srv := httptest.NewServer(httpapi.New(app.New(openaicompat.New(openaicompat.Config{VLLMURL: vllm.URL}))))
+	defer srv.Close()
+
+	resp, body := post(t, srv, `{"model":"m","tools":[{"type":"function","function":{"name":"f"}}],"messages":[{"role":"user","content":"x"}]}`)
+	if resp.StatusCode != 200 {
+		t.Fatalf("status %d: %s", resp.StatusCode, body)
+	}
+	var out struct {
+		Choices []struct {
+			Message struct {
+				Content   *string           `json:"content"`
+				ToolCalls []json.RawMessage `json:"tool_calls"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal([]byte(body), &out); err != nil {
+		t.Fatal(err)
+	}
+	m := out.Choices[0].Message
+	if m.Content == nil || *m.Content != "Let me check." || len(m.ToolCalls) != 1 {
+		t.Errorf("want preamble and tool call both kept, got content=%v calls=%d", m.Content, len(m.ToolCalls))
+	}
+}
+
+func TestE2E_NonStreamEmptyAnswerIsEmptyString(t *testing.T) {
+	srv := fakeServer(t, &testdoubles.Provider{Events: []domain.Event{{Kind: domain.EventStart, ID: "x"}, {Kind: domain.EventFinish, FinishReason: "stop"}}})
+	_, body := post(t, srv, `{"model":"m"}`)
+	if !strings.Contains(body, `"content":""`) {
+		t.Errorf("want content \"\" for an empty plain answer, got %s", body)
+	}
+}
+
+// Critique pass 1, finding 8: an oversized body is a 413, not "invalid JSON".
+func TestE2E_OversizedBodyIs413(t *testing.T) {
+	srv := fakeServer(t, &testdoubles.Provider{})
+	big := `{"model":"m","messages":[{"role":"user","content":"` + strings.Repeat("a", 65<<20) + `"}]}`
+	resp, _ := post(t, srv, big)
+	if resp.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Errorf("want 413, got %d", resp.StatusCode)
+	}
+}
+
+// Critique pass 1, finding 9.
+func TestE2E_MultipleChoicesRejected(t *testing.T) {
+	srv := fakeServer(t, &testdoubles.Provider{})
+	resp, body := post(t, srv, `{"model":"m","n":3}`)
+	if resp.StatusCode != http.StatusBadRequest || !strings.Contains(body, "n > 1") {
+		t.Errorf("want 400 naming n > 1, got %d %s", resp.StatusCode, body)
+	}
+}
+
+// Critique pass 1, finding 13: an event that writes nothing must not commit a
+// 200, so a following error still gets its real status.
+func TestE2E_SuppressedEventDoesNotCommitHeaders(t *testing.T) {
+	srv := fakeServer(t, &testdoubles.Provider{
+		Events: []domain.Event{{Kind: domain.EventUsage, Usage: domain.Usage{TotalTokens: 1}}},
+		Err:    &domain.UpstreamError{Status: 503, ContentType: "application/json", Body: []byte(`{"error":"down"}`)},
+	})
+	resp, body := post(t, srv, `{"model":"m","stream":true}`)
+	if resp.StatusCode != 503 || body != `{"error":"down"}` {
+		t.Errorf("want the upstream 503, got %d %q", resp.StatusCode, body)
+	}
+}

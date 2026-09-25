@@ -80,6 +80,7 @@ func (s *sseSink) begin() {
 }
 
 func (s *sseSink) write(v any) error {
+	s.begin()
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -100,9 +101,11 @@ func (s *sseSink) chunk(d sseDelta, finish *string) sseChunk {
 	}
 }
 
-// Emit implements domain.EventSink.
+// Emit implements domain.EventSink. Headers are committed by the first chunk
+// actually written, not by the first event: an event that writes nothing
+// (suppressed usage, a kind this encoder doesn't render) must not turn a later
+// error into a 200.
 func (s *sseSink) Emit(e domain.Event) error {
-	s.begin()
 	switch e.Kind {
 	case domain.EventStart:
 		s.id, s.model, s.created = e.ID, e.Model, e.Created
@@ -197,12 +200,11 @@ func (j *jsonSink) Emit(e domain.Event) error {
 	return nil
 }
 
-// response renders the accumulated chat.completion.
+// response renders the accumulated chat.completion. content is a string —
+// "" when the answer had no text — except when the answer is only tool calls,
+// where OpenAI (and the original transform) use null.
 func (j *jsonSink) response() map[string]any {
-	msg := map[string]any{"role": "assistant", "content": nil}
-	if j.hasContent {
-		msg["content"] = j.content.String()
-	}
+	msg := map[string]any{"role": "assistant", "content": j.content.String()}
 	if len(j.toolCalls) > 0 {
 		idx := make([]int, 0, len(j.toolCalls))
 		for i := range j.toolCalls {
@@ -214,8 +216,9 @@ func (j *jsonSink) response() map[string]any {
 			calls = append(calls, j.toolCalls[i])
 		}
 		msg["tool_calls"] = calls
-		// OpenAI spec: content is null when tool_calls are present.
-		msg["content"] = nil
+		if !j.hasContent {
+			msg["content"] = nil
+		}
 	}
 	fr := j.finishReason
 	if fr == "" {

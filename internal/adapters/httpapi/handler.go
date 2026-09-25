@@ -14,8 +14,10 @@ import (
 	"github.com/gjcourt/llmux/internal/ports/inbound"
 )
 
-// maxBody caps a request body. Chat histories are text; 16 MiB is generous.
-const maxBody = 16 << 20
+// maxBody caps a request body. Open WebUI sends images inline as base64, so
+// this must be well above a chat history's size; the original proxy had no
+// limit at all.
+const maxBody = 64 << 20
 
 // Handler serves the OpenAI-compatible routes.
 type Handler struct {
@@ -38,8 +40,13 @@ func (h *Handler) healthz(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (h *Handler) chat(w http.ResponseWriter, r *http.Request) {
-	body, err := io.ReadAll(io.LimitReader(r.Body, maxBody))
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxBody))
 	if err != nil {
+		var tooBig *http.MaxBytesError
+		if errors.As(err, &tooBig) {
+			writeError(w, http.StatusRequestEntityTooLarge, "request body exceeds 64 MiB")
+			return
+		}
 		writeError(w, http.StatusBadRequest, "failed to read request body")
 		return
 	}
@@ -104,7 +111,9 @@ func writeChatError(w http.ResponseWriter, err error) {
 func writeError(w http.ResponseWriter, status int, msg string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
+	enc := json.NewEncoder(w)
+	enc.SetEscapeHTML(false)   // this is an API, not HTML: keep "n > 1" readable
+	enc.Encode(map[string]any{ //nolint:errcheck
 		"error": map[string]string{"message": msg, "type": http.StatusText(status)},
 	})
 }

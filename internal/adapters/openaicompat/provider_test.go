@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -276,5 +277,75 @@ func TestHandlesOnlyWhenEnabled(t *testing.T) {
 	}
 	if !New(Config{OllamaURL: "http://x"}).Handles("anything") {
 		t.Error("an enabled provider is the catch-all")
+	}
+}
+
+// Critique pass 1, finding 3. The original proxyTransformInner ran every JSON
+// body through the transform whatever its status, so an Ollama error on the
+// tool path (e.g. 400 "model does not support tools") parsed as an empty
+// response and triggered the plain-chat retry. Returning the error first
+// broke that recovery.
+func TestTransform_ErrorOnToolPathRetriesAsPlainChat(t *testing.T) {
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		b, _ := io.ReadAll(r.Body)
+		if strings.Contains(string(b), `"tools"`) {
+			w.WriteHeader(http.StatusBadRequest)
+			w.Write([]byte(`{"error":{"message":"model does not support tools"}}`)) //nolint:errcheck
+			return
+		}
+		writeOllamaResp(w, "hello")
+	}))
+	defer up.Close()
+
+	orig := []byte(`{"model":"m","messages":[{"role":"user","content":"hi"}],"tools":[{"type":"function","function":{"name":"f"}}]}`)
+	rec := &recorder{}
+	if err := New(Config{}).transform(context.Background(), up.URL, forceNoStream(orig), orig, false, rec); err != nil {
+		t.Fatalf("want recovery via plain-chat retry, got %v", err)
+	}
+	if rec.text() != "hello" {
+		t.Errorf("want the retried answer, got %q", rec.text())
+	}
+}
+
+// An error that survives the retry is still reported, not swallowed.
+func TestTransform_ErrorAfterRetryIsRelayed(t *testing.T) {
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusServiceUnavailable)
+		w.Write([]byte(`{"error":{"message":"loading model"}}`)) //nolint:errcheck
+	}))
+	defer up.Close()
+
+	orig := []byte(`{"model":"m","messages":[{"role":"user","content":"hi"}],"tools":[{"type":"function","function":{"name":"f"}}]}`)
+	err := New(Config{}).transform(context.Background(), up.URL, forceNoStream(orig), orig, false, &recorder{})
+	var ue *domain.UpstreamError
+	if !errors.As(err, &ue) || ue.Status != http.StatusServiceUnavailable {
+		t.Fatalf("want the upstream 503 relayed after the retry, got %v", err)
+	}
+}
+
+// Critique pass 1, finding 5: an upstream error chunk must not become a silent
+// empty answer.
+func TestRelaySSE_ErrorChunk(t *testing.T) {
+	first := "data: {\"error\":{\"message\":\"boom\"}}\n\n"
+	err := relaySSE(strings.NewReader(first), &recorder{})
+	var ue *domain.UpstreamError
+	if !errors.As(err, &ue) || !strings.Contains(string(ue.Body), "boom") {
+		t.Fatalf("error as first chunk: want UpstreamError carrying the body, got %v", err)
+	}
+
+	mid := strings.Join([]string{
+		`data: {"id":"c","model":"m","choices":[{"delta":{"content":"par"},"finish_reason":null}]}`,
+		`data: {"error":{"message":"boom"}}`,
+		`data: [DONE]`,
+	}, "\n\n")
+	rec := &recorder{}
+	err = relaySSE(strings.NewReader(mid), rec)
+	if err == nil || !strings.Contains(err.Error(), "boom") || errors.As(err, &ue) {
+		t.Fatalf("error mid-stream: want a plain error mentioning boom, got %v", err)
+	}
+	if rec.text() != "par" {
+		t.Errorf("text before the error should still be relayed, got %q", rec.text())
 	}
 }

@@ -57,10 +57,41 @@ func TestParseRequest_Fields(t *testing.T) {
 	}
 }
 
+// Only a non-object body, or n > 1, is rejected.
 func TestParseRequest_Invalid(t *testing.T) {
-	for _, body := range []string{`not json`, `{"messages":[{"role":"user","content":42}]}`, `{"stop":7}`} {
+	for _, body := range []string{`not json`, `{"model":"m","n":2}`} {
 		if _, err := parseRequest([]byte(body)); err == nil {
 			t.Errorf("%s: want error", body)
 		}
+	}
+}
+
+// Critique pass 1, finding 7: bodies the original proxy forwarded untouched
+// must still be accepted.
+func TestParseRequest_Lenient(t *testing.T) {
+	cases := []string{
+		`{"model":"m","max_tokens":1024.0}`,
+		`{"model":"m","n":1}`,
+		`{"model":"m","stop":7}`,
+		`{"model":"m","messages":[{"role":"user","content":42}]}`,
+		`{"model":"m","messages":[{"role":"assistant","tool_calls":[{"id":"c","function":{"name":"f","arguments":{"q":"x"}}}]}]}`,
+	}
+	for _, body := range cases {
+		req, err := parseRequest([]byte(body))
+		if err != nil {
+			t.Errorf("%s: want accepted, got %v", body, err)
+			continue
+		}
+		if string(req.Raw) != body {
+			t.Errorf("%s: Raw must be forwarded unchanged", body)
+		}
+	}
+	req, _ := parseRequest([]byte(cases[0]))
+	if req.MaxTokens == nil || *req.MaxTokens != 1024 {
+		t.Errorf("1024.0 should read as 1024, got %v", req.MaxTokens)
+	}
+	req, _ = parseRequest([]byte(cases[4]))
+	if got := req.Messages[0].ToolCalls[0].Arguments; got != `{"q":"x"}` {
+		t.Errorf("object arguments should become their JSON text, got %q", got)
 	}
 }

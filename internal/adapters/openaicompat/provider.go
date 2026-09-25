@@ -145,6 +145,16 @@ func (p *Provider) transform(ctx context.Context, target string, body, originalB
 	defer resp.Body.Close()
 
 	if resp.StatusCode >= 300 {
+		// The original proxyTransformInner ran every body through the
+		// transform whatever its status, so an error on the tool path — e.g.
+		// Ollama's 400 "model does not support tools" — parsed as an empty
+		// response and was retried as plain chat. Keep that recovery; only an
+		// error that survives the retry (or that has no retry) is relayed.
+		if !isRetry && !hasToolResultMessages(originalBody) {
+			slog.Warn("upstream error on tool path, retrying as plain chat", "status", resp.StatusCode)
+			stripped := stripTools(originalBody)
+			return p.transform(ctx, target, forceNoStream(stripped), stripped, true, sink)
+		}
 		return upstreamError(resp)
 	}
 	respBody, err := io.ReadAll(resp.Body)
@@ -195,6 +205,11 @@ func emitMessage(resp openAIResponse, sink domain.EventSink) error {
 	events := []domain.Event{{Kind: domain.EventStart, ID: resp.ID, Model: resp.Model, Created: resp.Created}}
 
 	if len(c.Message.ToolCalls) > 0 {
+		// Text alongside tool calls (vLLM can send a preamble) is kept. On the
+		// transform path applyToolCallTransform has already nulled it.
+		if c.Message.Content != nil && *c.Message.Content != "" {
+			events = append(events, domain.Event{Kind: domain.EventText, Text: *c.Message.Content})
+		}
 		for i, tc := range c.Message.ToolCalls {
 			events = append(events,
 				domain.Event{Kind: domain.EventToolCall, ToolCall: domain.ToolCallDelta{Index: i, ID: tc.ID, Type: "function", Name: tc.Function.Name}},
@@ -244,12 +259,22 @@ type streamChunk struct {
 		FinishReason *string `json:"finish_reason"`
 	} `json:"choices"`
 	Usage json.RawMessage `json:"usage"`
+	Error json.RawMessage `json:"error"`
 }
 
 // relaySSE translates an upstream OpenAI SSE stream into events.
+//
+// It handles the SSE that vLLM and Ollama emit — one single-line `data:`
+// payload per event, terminated by `data: [DONE]`. It is not a general SSE
+// parser: multi-line data fields are not joined and `event:` names are
+// ignored, so don't reuse it for an upstream that relies on either.
+//
+// An upstream `{"error":...}` chunk is reported, never dropped: before the
+// first event it becomes an UpstreamError (so the client gets an error status);
+// after it, an error (so the client gets an in-stream error chunk).
 func relaySSE(r io.Reader, sink domain.EventSink) error {
 	sc := bufio.NewScanner(r)
-	sc.Buffer(make([]byte, 64*1024), 4<<20)
+	sc.Buffer(make([]byte, 64*1024), 16<<20)
 	started := false
 	for sc.Scan() {
 		line := strings.TrimRight(sc.Text(), "\r")
@@ -264,6 +289,12 @@ func relaySSE(r io.Reader, sink domain.EventSink) error {
 		if err := json.Unmarshal([]byte(data), &ch); err != nil {
 			slog.Warn("skipping unparseable upstream chunk", "err", err, "data", data[:min(len(data), 200)])
 			continue
+		}
+		if len(ch.Error) > 0 && string(ch.Error) != "null" {
+			if !started {
+				return &domain.UpstreamError{Status: http.StatusBadGateway, ContentType: "application/json", Body: []byte(data)}
+			}
+			return fmt.Errorf("upstream error mid-stream: %s", ch.Error)
 		}
 		if !started {
 			started = true

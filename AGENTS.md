@@ -60,7 +60,7 @@ Full description: [Architecture Overview](docs/architecture/2026-07-25-overview.
 - A nil/empty input must not panic any transform stage; failures return original bytes and the original parse error.
 - The compiled binary lives at `./llmux`; never committed.
 - A provider emits nothing before it knows it can serve the request.
-- `GET /healthz` returns 200 even with no providers configured — the homelab staging deployment runs without an API key and depends on it.
+- `GET /healthz` returns 200 even with no providers configured — the planned homelab deployment (homelab#1471) uses it as its readiness probe.
 
 ## What NOT to Do
 
