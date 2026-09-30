@@ -6,8 +6,8 @@ OpenAI-compatible HTTP proxy that routes chat requests to Anthropic and vLLM/Oll
 Tool-calling models served through vLLM or Ollama often return malformed JSON
 tool calls — `<tool_call>` XML wrappers, orphaned `<think>` tags, missing
 terminators — that break OpenAI-compatible clients expecting a clean
-`tool_calls` array. llmux sits between a client (Open WebUI, Open Interpreter,
-Claude Code) and the model servers, repairing the response before it reaches
+`tool_calls` array. llmux sits between an OpenAI-compatible client (Open WebUI,
+Open Interpreter) and the model servers, repairing the response before it reaches
 them. It also offers a native Anthropic backend behind the same OpenAI-shaped
 API, with server-side web search and cited sources. Routing is by model name,
 so a client picks a backend just by naming a model.
