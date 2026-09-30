@@ -1,31 +1,62 @@
+<!-- readme-type: service -->
 # llmux
 
-llmux is an OpenAI-compatible HTTP proxy that routes `/v1/chat/completions`
-requests to model backends: Anthropic's native Messages API (with
-server-side web search and cited sources) and vLLM/Ollama, where it repairs
-malformed tool calls and strips `<think>` blocks that local models leave in
-their output.
+OpenAI-compatible HTTP proxy that routes chat requests to Anthropic and vLLM/Ollama backends
 
-## Backends
+Tool-calling models served through vLLM or Ollama often return malformed JSON
+tool calls — `<tool_call>` XML wrappers, orphaned `<think>` tags, missing
+terminators — that break OpenAI-compatible clients expecting a clean
+`tool_calls` array. llmux sits between a client (Open WebUI, Open Interpreter,
+Claude Code) and the model servers, repairing the response before it reaches
+them. It also offers a native Anthropic backend behind the same OpenAI-shaped
+API, with server-side web search and cited sources. Routing is by model name,
+so a client picks a backend just by naming a model.
 
-Routing is by model name: the first backend whose model list matches the
-request's `model` field handles it.
+**Status:** in production and staging on the homelab since 2026-09-25
+(gjcourt/homelab#1471), proxying Open WebUI's chats to Anthropic; the
+vLLM/Ollama backends are configured off since the homelab GPUs were sold.
 
-- **Anthropic** — calls the native `/v1/messages` API (not the
-  OpenAI-compatible endpoint, which ignores `web_search_options`). Enabled by
-  `LLMUX_ANTHROPIC_API_KEY`. Offers the model server-side web search and
-  relays cited sources as OpenAI `url_citation` annotations. Rejects client
-  tools, tool history and images with a 400 by default, since it can't
-  faithfully forward them; `LLMUX_CLIENT_TOOLS=drop` instead drops them
-  silently, which is what Open WebUI needs since it sends its built-in tools
-  on every chat.
-- **vLLM / Ollama** — an OpenAI-compatible catch-all for everything else.
-  Requests with tools go to vLLM, falling back to Ollama and repairing its
-  response (`<tool_call>` XML, orphaned `<think>` tags, malformed JSON);
-  plain chat goes to Ollama, falling back to vLLM. Off by default
-  (`LLMUX_VLLM_URL` / `LLMUX_OLLAMA_URL` empty).
+```text
+go build -o llmux ./cmd/llmux
+LLMUX_ADDR=127.0.0.1:18080 LLMUX_METRICS_ADDR=127.0.0.1:19090 ./llmux &
+time=2026-09-30T06:04:00.011Z level=WARN msg="no model backends configured; every chat request will return 404"
+time=2026-09-30T06:04:00.015Z level=INFO msg="llmux listening" addr=127.0.0.1:18080 providers=0
 
-At least one backend must be configured or every chat request 404s.
+curl http://127.0.0.1:18080/healthz
+ok
+
+curl http://127.0.0.1:18080/v1/models
+{"data":[],"object":"list"}
+```
+
+## Quick start
+
+Needs: Go 1.25+.
+
+```bash
+git clone https://github.com/gjcourt/llmux && cd llmux
+go build -o llmux ./cmd/llmux
+./llmux
+```
+
+Then check `curl http://localhost:8080/healthz`, which answers `ok` as soon
+as the process is up. Without `LLMUX_ANTHROPIC_API_KEY` (or a vLLM/Ollama
+URL) set, llmux still starts but every chat request 404s — see
+Configuration to enable a backend.
+
+## Usage
+
+Send a chat request the same way you would to OpenAI; llmux routes it by
+model name to whichever backend is configured.
+
+```bash
+curl http://localhost:8080/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"model": "claude-sonnet-5", "messages": [{"role": "user", "content": "hi"}]}'
+```
+
+With no backend configured this 404s (`no provider serves this model`); set
+`LLMUX_ANTHROPIC_API_KEY` and it answers in the same shape OpenAI does.
 
 ## Configuration
 
@@ -52,73 +83,46 @@ whichever header the client already sends its provider key in. Keys must be
 at least 32 characters from `[A-Za-z0-9_-]` — generate one with
 `openssl rand -hex 32`.
 
-## Running it
-
-```
-go build -o llmux ./cmd/llmux
-LLMUX_ANTHROPIC_API_KEY=sk-ant-... ./llmux
-```
-
-or with Docker:
-
-```
-docker build -t llmux .
-docker run -p 8080:8080 -e LLMUX_ANTHROPIC_API_KEY=sk-ant-... llmux
-```
-
-`GET /healthz` returns 200 as soon as the process is up, even with no
-backend configured, so it works as a readiness probe. The chat API is
-`POST /v1/chat/completions` and `GET /v1/models`; metrics are on the
-separate listener above, not the chat port.
-
 ## How it works
 
 Backends speak `domain.Event`s, not HTTP: each one turns its upstream
 response into a stream of Start/Text/ToolCall/Finish/Usage events pushed
-into a sink, and the HTTP layer turns those events into OpenAI SSE or JSON.
-A backend never writes to the client directly, so adding one needs no HTTP
-code, and it must not emit anything before it knows it can serve the
-request — an error returned before the first event becomes a clean HTTP
-status, one after it becomes an in-stream error chunk.
-
-```
-cmd/llmux/                      config + wiring
-internal/domain/                ChatRequest, Event, EventSink, errors — stdlib only
-internal/ports/inbound/         ChatService
-internal/ports/outbound/        ChatProvider, Metrics
-internal/app/                   routes a request to the first provider that Handles(model); meters it
-internal/adapters/httpapi/      inbound: /v1/chat/completions, /v1/models, /healthz
-internal/adapters/anthropic/    outbound: Anthropic Messages API
-internal/adapters/openaicompat/ outbound: vLLM + Ollama, failover, tool-call repair
-internal/adapters/prometheus/   outbound: metrics, served on its own listener
-internal/testdoubles/           scripted fake ChatProvider for tests
-```
-
-The layout is hexagonal and enforced by `go-arch-lint`
-(`.go-arch-lint.yml`): `domain` imports nothing internal, ports import only
-`domain`, and adapters never import each other. See
+into a sink, and the HTTP layer turns those into OpenAI SSE or JSON — a
+backend never writes to the client directly, so adding one needs no HTTP
+code. Provider order is routing: the first backend whose `Handles(model)` is
+true serves the request, so Anthropic's specific model list is checked
+before the vLLM/Ollama catch-all. The layout is hexagonal and enforced by
+`go-arch-lint` (`.go-arch-lint.yml`); the same events feed Prometheus metrics
+on a separate listener (`LLMUX_METRICS_ADDR`). See
 [docs/architecture/2026-07-25-overview.md](docs/architecture/2026-07-25-overview.md)
-for the full request flow.
+for the full request flow and
+[docs/design/2026-09-25-telemetry.md](docs/design/2026-09-25-telemetry.md)
+for telemetry.
 
 ## Development
 
+```bash
+go build ./... && go build -o llmux ./cmd/llmux   # Build
+go-arch-lint check                                # Arch guard
+go test -race -count=1 -timeout 120s ./...        # Test
+gofmt -l .                                        # Format (must print nothing)
+go vet ./...                                      # Vet
+golangci-lint run --timeout=5m                    # Lint
+go mod tidy                                       # Tidy (must not change go.mod/go.sum)
 ```
-go build -o llmux ./cmd/llmux   # compile
-go test -race ./...             # tests, with the race detector
-go vet ./...                    # static analysis
-go fmt ./...                    # gofmt
-go-arch-lint check              # hexagonal dependency rule
-```
 
-CI (`.github/workflows/ci.yml`) runs all of the above plus `golangci-lint`
-and a `go mod tidy` check on every push and pull request to `master`.
-`.github/workflows/image.yml` builds and, on `master`, pushes a multi-arch
-image to `ghcr.io/gjcourt/llmux`.
+Conventions for contributors and agents: [AGENTS.md](AGENTS.md).
 
-## Observability
+## Deployment
 
-Logs go to stderr as `slog` text at debug level. Prometheus metrics —
-request counts and outcomes, in-flight requests, latency, time to first
-token, tokens by type, web searches, citations, auth failures — are served
-on `LLMUX_METRICS_ADDR`, labelled by client, provider and model. See
-[docs/design/2026-09-25-telemetry.md](docs/design/2026-09-25-telemetry.md).
+Runs on the homelab as a Kubernetes Deployment behind its own Service and
+NetworkPolicy, in front of Open WebUI. Production and staging overlays are
+in `gjcourt/homelab`'s
+[`apps/base/llmux`](https://github.com/gjcourt/homelab/tree/master/apps/base/llmux)
+and
+[`apps/production/llmux`](https://github.com/gjcourt/homelab/tree/master/apps/production/llmux);
+there is no llmux-specific runbook yet.
+
+## License
+
+No licence file yet.
