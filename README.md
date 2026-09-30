@@ -130,4 +130,4 @@ there is no llmux-specific runbook yet.
 
 ## License
 
-No licence file yet.
+[Apache-2.0](LICENSE)
