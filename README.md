@@ -13,13 +13,16 @@ API, with server-side web search and cited sources. Routing is by model name,
 so a client picks a backend just by naming a model.
 
 **Status:** in production and staging on the homelab since 2026-09-25
-(gjcourt/homelab#1471), proxying Open WebUI's chats to Anthropic; the
-vLLM/Ollama backends are configured off since the homelab GPUs were sold.
+(gjcourt/homelab#1471), proxying Open WebUI's chats to Anthropic. The
+vLLM/Ollama backends are supported but not running: their URLs are empty in
+the homelab config since the homelab GPUs were sold.
 
 ```text
 go build -o llmux ./cmd/llmux
 LLMUX_ADDR=127.0.0.1:18080 LLMUX_METRICS_ADDR=127.0.0.1:19090 ./llmux &
 time=2026-09-30T06:04:00.011Z level=WARN msg="no model backends configured; every chat request will return 404"
+time=2026-09-30T06:04:00.012Z level=WARN msg="no client keys configured: llmux accepts unauthenticated requests"
+time=2026-09-30T06:04:00.012Z level=INFO msg="metrics listening" addr=127.0.0.1:19090
 time=2026-09-30T06:04:00.015Z level=INFO msg="llmux listening" addr=127.0.0.1:18080 providers=0
 
 curl http://127.0.0.1:18080/healthz
@@ -115,12 +118,14 @@ Conventions for contributors and agents: [AGENTS.md](AGENTS.md).
 
 ## Deployment
 
-Runs on the homelab as a Kubernetes Deployment behind its own Service and
-NetworkPolicy, in front of Open WebUI. Production and staging overlays are
-in `gjcourt/homelab`'s
-[`apps/base/llmux`](https://github.com/gjcourt/homelab/tree/master/apps/base/llmux)
+Runs on the homelab as a Kubernetes Deployment with its own Service and
+CiliumNetworkPolicy, as Open WebUI's model backend. Manifests are in
+`gjcourt/homelab`:
+[`apps/base/llmux`](https://github.com/gjcourt/homelab/tree/master/apps/base/llmux),
+with overlays in
+[`apps/production/llmux`](https://github.com/gjcourt/homelab/tree/master/apps/production/llmux)
 and
-[`apps/production/llmux`](https://github.com/gjcourt/homelab/tree/master/apps/production/llmux);
+[`apps/staging/llmux`](https://github.com/gjcourt/homelab/tree/master/apps/staging/llmux);
 there is no llmux-specific runbook yet.
 
 ## License
