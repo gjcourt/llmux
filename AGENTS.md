@@ -91,7 +91,7 @@ Full description: [Architecture Overview](docs/architecture/2026-07-25-overview.
 
 ## Domain
 
-Tool-calling models in vLLM/Ollama frequently return malformed JSON tool calls — `<tool_call>` XML wrappers, orphan `<think>` tags, missing terminators. llmux sits between a tool-aware client (Open Interpreter, Claude Code, etc.) and the model server, repairing the response so downstream parsers don't choke.
+Tool-calling models in vLLM/Ollama frequently return malformed JSON tool calls — `<tool_call>` XML wrappers, orphan `<think>` tags, missing terminators. llmux sits between a tool-aware OpenAI-compatible client (Open WebUI, Open Interpreter, etc.) and the model server, repairing the response so downstream parsers don't choke.
 
 ## Client keys
 
